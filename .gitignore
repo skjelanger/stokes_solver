@@ -27,3 +27,9 @@ Thumbs.db
 # Misc
 *.log
 *.bak
+
+# Ignore plots
+plots/
+
+# Ignore simulations
+simulations/

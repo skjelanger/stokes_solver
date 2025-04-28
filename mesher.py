@@ -54,7 +54,7 @@ class Mesh:
         self.outlet_edges = outlet_edges
         self.pressure_nodes = pressure_nodes
         self.pressure_index_map = pressure_index_map
-        
+
         
     def plot(self, show_node_ids=True, filename="mesh_plot.png"):
         """
@@ -106,11 +106,11 @@ class Mesh:
         print(f"Mesh plot saved as {filename}.")
         return
 
-def create_mesh(mesh_size, output_file="square_with_hole.msh"):
+def create_mesh(geometry_length=0.01, mesh_size=0.0001, output_file="square_with_hole.msh"):
     """
     Generates a 2D unstructured P2 triangular mesh of a square domain with a circular hole.
 
-    The domain is a unit square [0,1] x [0,1] with a circular hole of radius 0.3 centered at (0.5, 0.5).
+    The domain is a unit square [0,l] x [0,l] with a circular hole of radius l/3 centered at (l/2, l/2).
     The mesh is generated using Gmsh and saved to a `.msh` file.
 
     Parameters
@@ -128,12 +128,14 @@ def create_mesh(mesh_size, output_file="square_with_hole.msh"):
 
     gmsh.initialize()
     gmsh.model.add(output_file.rstrip(".msh"))
+    
+    l = geometry_length
 
     # Outer square
     s_p1 = gmsh.model.occ.addPoint(0.0, 0.0, 0.0, mesh_size)
-    s_p2 = gmsh.model.occ.addPoint(1.0, 0.0, 0.0, mesh_size)
-    s_p3 = gmsh.model.occ.addPoint(1.0, 1.0, 0.0, mesh_size)
-    s_p4 = gmsh.model.occ.addPoint(0.0, 1.0, 0.0, mesh_size)
+    s_p2 = gmsh.model.occ.addPoint(l, 0.0, 0.0, mesh_size)
+    s_p3 = gmsh.model.occ.addPoint(l, l, 0.0, mesh_size)
+    s_p4 = gmsh.model.occ.addPoint(0.0, l, 0.0, mesh_size)
 
     l1 = gmsh.model.occ.addLine(s_p1, s_p2)  # bottom
     l2 = gmsh.model.occ.addLine(s_p2, s_p3)  # right
@@ -144,12 +146,12 @@ def create_mesh(mesh_size, output_file="square_with_hole.msh"):
     square_surface = gmsh.model.occ.addPlaneSurface([square_loop])
 
     # Circle hole
-    r = 0.3
-    center = gmsh.model.occ.addPoint(0.5, 0.5, 0.0, mesh_size)
-    c_p1 = gmsh.model.occ.addPoint(0.5 + r, 0.5, 0.0, mesh_size)
-    c_p2 = gmsh.model.occ.addPoint(0.5, 0.5 + r, 0.0, mesh_size)
-    c_p3 = gmsh.model.occ.addPoint(0.5 - r, 0.5, 0.0, mesh_size)
-    c_p4 = gmsh.model.occ.addPoint(0.5, 0.5 - r, 0.0, mesh_size)
+    r = l/3
+    center = gmsh.model.occ.addPoint(l/2, l/2, 0.0, mesh_size)
+    c_p1 = gmsh.model.occ.addPoint(l/2 + r, l/2, 0.0, mesh_size)
+    c_p2 = gmsh.model.occ.addPoint(l/2, l/2 + r, 0.0, mesh_size)
+    c_p3 = gmsh.model.occ.addPoint(l/2 - r, l/2, 0.0, mesh_size)
+    c_p4 = gmsh.model.occ.addPoint(l/2, l/2 - r, 0.0, mesh_size)
 
     arc1 = gmsh.model.occ.addCircleArc(c_p1, center, c_p2)
     arc2 = gmsh.model.occ.addCircleArc(c_p2, center, c_p3)

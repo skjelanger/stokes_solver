@@ -6,7 +6,7 @@ Created on Fri Apr  4 07:15:06 2025
 """
 
 import pickle
-
+import os
 import meshio
 import numpy as np
 import matplotlib.pyplot as plt
@@ -24,11 +24,13 @@ from datetime import datetime
 
 
 class Simulation:
-    def __init__(self, mesh, f, mu=0.001, rho=1000.0):
+    def __init__(self, mesh, f, mu=0.001, rho=1000.0, inlet_velocity_profile=None):
         self.mesh = mesh
         self.f = f
         self.mu = mu
         self.rho = rho
+        self.inlet_velocity_profile = inlet_velocity_profile
+
 
         self.u1 = None
         self.u2 = None
@@ -36,6 +38,12 @@ class Simulation:
         self.lhs = None
         self.rhs = None
         
+        
+    def get_description(self):
+        desc = f"mu={self.mu:.2e}, rho={self.rho:.1f}"
+        if self.mesh.mesh_size is not None:
+            desc += f", h={self.mesh.mesh_size:.3f}"
+        return desc
         
     def save(self, filename):
         with open(filename, "wb") as f:
@@ -75,7 +83,7 @@ class Simulation:
 
         self.rhs = np.concatenate([b1, b2, zero_b])
 
-        apply_boundary_conditions(self.lhs, self.rhs, self.mesh, n, m)
+        self.apply_boundary_conditions()
 
         self.lhs_scr = self.lhs.tocsr()
         
@@ -110,9 +118,69 @@ class Simulation:
 
         
     def plot(self):
-        plot_velocity_magnitude(self.mesh, self.u1, self.u2)
-        plot_pressure(self.mesh, self.p)
+        desc = self.get_description()
+        plot_velocity_magnitude(self.mesh, self.u1, self.u2, title_suffix=desc)
+        plot_pressure(self.mesh, self.p, title_suffix=desc)
         
+        
+    def apply_boundary_conditions(self):
+        """
+        Modifies the system matrix (lhs) and RHS vector (rhs) to apply:
+        - No-slip condition on boundary (v = 0)
+        - Parabolic inflow on inlet
+        - Pressure fixing on outlet
+    
+        """
+        n = self.mesh.nodes.shape[0]
+        m = len(self.mesh.pressure_nodes)
+        lhs = self.lhs
+        rhs = self.rhs
+        mesh = self.mesh
+            
+        # --- No-slip walls (v = 0)
+        for edge in mesh.boundary_edges:
+            for node in edge:
+                # x-velocity
+                lhs[node, :] = 0
+                lhs[:, node] = 0
+                lhs[node, node] = 1
+                rhs[node] = 0
+    
+                # y-velocity
+                node_y = node + n
+                lhs[node_y, :] = 0
+                lhs[:, node_y] = 0
+                lhs[node_y, node_y] = 1
+                rhs[node_y] = 0
+    
+        # --- Fix pressure at outlet
+        pressure_dofs_on_outlet = []
+        for edge in mesh.outlet_edges:
+            for node in edge:
+                if node in mesh.pressure_index_map:
+                    pressure_dofs_on_outlet.append(mesh.pressure_index_map[node])
+    
+        if pressure_dofs_on_outlet:
+            pdof = 2 * n + pressure_dofs_on_outlet[0]
+            lhs[pdof, :] = 0
+            lhs[:, pdof] = 0
+            lhs[pdof, pdof] = 1
+            rhs[pdof] = 0
+    
+        for edge in mesh.inlet_edges:
+            for node in edge:
+                y = mesh.nodes[node][1]
+                ux = self.inlet_velocity_profile(y)
+    
+                lhs[node, :] = 0
+                lhs[:, node] = 0
+                lhs[node, node] = 1
+                rhs[node] = ux
+    
+                lhs[node + n, :] = 0
+                lhs[:, node + n] = 0
+                lhs[node + n, node + n] = 1
+                rhs[node + n] = 0        
 
 def LoadAssembler2D(nodes, triangles, f):
     """
@@ -375,94 +443,6 @@ def localDivergenceMatrix2D(nodes, triangle):
 
     return -B1_local, -B2_local
 
-def apply_boundary_conditions(lhs, rhs, mesh, n, m):
-    """
-    Modifies the system matrix (lhs) and RHS vector (rhs) to apply:
-    - No-slip condition on boundary (v = 0)
-    - Parabolic inflow on inlet
-    - Pressure fixing on outlet
-
-    Parameters
-    ----------
-    lhs : lil_matrix
-        System matrix before applying Dirichlet/essential boundary conditions.
-
-    rhs : ndarray
-        Right-hand side vector.
-
-    nodes : ndarray
-        Coordinates of mesh nodes.
-
-    n : int
-        Number of velocity degrees of freedom (P2).
-
-    m : int
-        Number of pressure degrees of freedom (P1).
-
-    triangles : ndarray
-        Mesh connectivity.
-
-    pressure_index_map : dict
-        Mapping from node indices to pressure DOFs.
-
-    boundary_edges, inlet_edges, outlet_edges : list of (int, int)
-        Edge classifications.
-
-    Returns
-    -------
-    None (modifies lhs and rhs in-place)
-    """
-    # Should BC only be applied to edge vertices
-    # not full edge triangles
-    
-    # --- No-slip walls (v = 0)
-    for edge in mesh.boundary_edges:
-        for node in edge:
-            # x-velocity
-            lhs[node, :] = 0
-            lhs[:, node] = 0
-            lhs[node, node] = 1
-            rhs[node] = 0
-
-            # y-velocity
-            node_y = node + n
-            lhs[node_y, :] = 0
-            lhs[:, node_y] = 0
-            lhs[node_y, node_y] = 1
-            rhs[node_y] = 0
-
-    # --- Fix pressure at outlet
-    pressure_dofs_on_outlet = []
-    for edge in mesh.outlet_edges:
-        for node in edge:
-            if node in mesh.pressure_index_map:
-                pressure_dofs_on_outlet.append(mesh.pressure_index_map[node])
-
-    if pressure_dofs_on_outlet:
-        pdof = 2 * n + pressure_dofs_on_outlet[0]
-        lhs[pdof, :] = 0
-        lhs[:, pdof] = 0
-        lhs[pdof, pdof] = 1
-        rhs[pdof] = 0
-
-    # --- Inlet parabolic profile
-    def inlet_velocity_profile(y, y_min=0.0, y_max=1.0, U_max=1.0):
-        return 40 * U_max * (y - y_min) * (y_max - y) / ((y_max - y_min)**2)
-
-    for edge in mesh.inlet_edges:
-        for node in edge:
-            y = mesh.nodes[node][1]
-            ux = inlet_velocity_profile(y)
-
-            lhs[node, :] = 0
-            lhs[:, node] = 0
-            lhs[node, node] = 1
-            rhs[node] = ux
-
-            lhs[node + n, :] = 0
-            lhs[:, node + n] = 0
-            lhs[node + n, node + n] = 1
-            rhs[node + n] = 0
 
 def sparse_qr_rank_check(A, tol=1e-12):
     A = csc_matrix(A)      # Ensure CSC format
@@ -486,22 +466,23 @@ def debug_dependent_columns(dependent_cols, nodes, n, m):
     summary = {"u1": 0, "u2": 0, "p": 0}
     print(f"Found {len(dependent_cols)} dependent DOFs:")
     for col in dependent_cols:
-        if col < n:
-            dof_type = "u1"
+        if col < n:  # DOF type is u1
             node_id = col
             coord = nodes[node_id][:2]
             summary["u1"] += 1
             print(f"  [u1] node {node_id:4d} at {coord}")
-        elif col < 2 * n:
-            dof_type = "u2"
+            
+        elif col < 2 * n: # DOF type is u2
             node_id = col - n
             coord = nodes[node_id][:2]
             summary["u2"] += 1
             print(f"  [u2] node {node_id:4d} at {coord}")
-        elif col < 2 * n + m:
+            
+        elif col < 2 * n + m:  # DOF type is pressure
             tri_id = col - 2 * n
             summary["p"] += 1
             print(f"  [ p] pressure DOF {tri_id:4d}")
+            
         else:
             print(f"  [??] col {col} is out of expected range.")
 
@@ -542,63 +523,85 @@ def plot_dependent_dofs(nodes, triangles, dependent_indices, n):
     plt.tight_layout()
     plt.show()
 
-def plot_velocity_magnitude(mesh, u1, u2):
+def plot_velocity_magnitude(mesh, u1, u2, title_suffix=""):
     magnitude = np.sqrt(u1**2 + u2**2)
     plt.figure(figsize=(6, 5))
     triangles_P1 = mesh.triangles[:, :3]
     t = mtri.Triangulation(mesh.nodes[:, 0], mesh.nodes[:, 1], triangles_P1)
     plt.tripcolor(t, magnitude, shading='flat', cmap='viridis', edgecolors='k', linewidth=0.1)
-    plt.title("Velocity Magnitude")
-    plt.xlabel("x")
-    plt.ylabel("y")
-    plt.colorbar(label='|u|')
-    plt.tight_layout()
-    plt.show()
-    return magnitude
     
-def plot_pressure(mesh, pressure):
-    """
-    Plot the pressure field on P1 nodes using mesh connectivity and pressure values.
+    plt.title(f"Velocity Magnitude [m/s]\n{title_suffix}")
+    plt.xlabel("x [m]")
+    plt.ylabel("y [m]")
+    plt.colorbar(label=r"$|u|$ [m/s]")
+    plt.tight_layout()
 
-    Parameters
-    ----------
-    mesh : Mesh
-        A Mesh object containing node coordinates, triangle connectivity, and pressure nodes.
+    # Save figure
+    safe_desc = title_suffix.replace(" ", "_").replace(",", "").replace("=", "").replace(".", "p")
+    plt.savefig(f"plots/velocity_magnitude_{safe_desc}.png", dpi=300)
+    plt.show()
+    plt.close()
+    
+    # --- NEW: Print some useful statistics ---
+    print(f"Max velocity magnitude: {np.max(magnitude):.4f} m/s")
+    print(f"Min velocity magnitude: {np.min(magnitude):.4f} m/s")
 
-    pressure : ndarray
-        Pressure values at P1 nodes (mesh.pressure_nodes).
+    return magnitude
 
-    Returns
-    -------
-    None
-    """
+    
+def plot_pressure(mesh, pressure, title_suffix=""):
     plt.figure(figsize=(6, 5))
-
-    # Extract coordinates of P1 pressure nodes
     vertex_coords = mesh.nodes[mesh.pressure_nodes]
-
-    # Reindex triangle vertex indices to match pressure node indexing
     old_to_new = {old: new for new, old in enumerate(mesh.pressure_nodes)}
     triangles_p1 = np.array([
         [old_to_new[i] for i in tri[:3]]
         for tri in mesh.triangles
         if all(i in old_to_new for i in tri[:3])
     ])
-
-    # Create triangulation from vertex coordinates
     t = mtri.Triangulation(vertex_coords[:, 0], vertex_coords[:, 1], triangles_p1)
-
-    # Plot the pressure field
     plt.tripcolor(t, pressure, shading='gouraud', cmap='coolwarm', edgecolors='k')
-    plt.title("Pressure Field (P1)")
-    plt.colorbar(label="p")
-    plt.xlabel("x")
-    plt.ylabel("y")
+    
+    plt.title(f"Pressure Field (P1) [Pa]\n{title_suffix}")
+    plt.colorbar(label=r"$p$ [Pa]")
+    plt.xlabel("x [m]")
+    plt.ylabel("y [m]")
     plt.gca().set_aspect("equal")
     plt.tight_layout()
+
+    safe_desc = title_suffix.replace(" ", "_").replace(",", "").replace("=", "").replace(".", "p")
+    plt.savefig(f"plots/pressure_field_{safe_desc}.png", dpi=300)
     plt.show()
+    plt.close()
 
+    # --- NEW: Print some useful statistics ---
+    print(f"Max pressure: {np.max(pressure):.4f} Pa")
+    print(f"Min pressure: {np.min(pressure):.4f} Pa")
 
+    
+    
+    
+def load_simulation(filename):
+    """
+    Load a Simulation object from a pickle file.
+
+    Parameters
+    ----------
+    filename : str
+        Path to the pickle file (.pkl) containing the saved Simulation.
+
+    Returns
+    -------
+    sim : Simulation
+        Loaded Simulation object.
+    """
+    filepath = f'simulations/{filename}'
+    
+    with open(filepath, "rb") as f:
+        sim = pickle.load(f)
+    print(f"Loaded simulation from '{filename}'")
+    return sim
+    
+    
 class P2Basis:
     @staticmethod
     def basis(i, xi, eta):
@@ -626,15 +629,39 @@ class P2Basis:
 
     
 if __name__ == "__main__":
-    # Define source terms
+    # Create folders if it does nto exist
+    os.makedirs("plots", exist_ok=True)
+    os.makedirs("simulations", exist_ok=True)
+    
+    # Define constants
+    geometry_length = 0.001 # meters
+    mesh_size = geometry_length * 0.1 # meters
+    inlet_velocity = 1 # m/s
+    mu = 0.001 # Viscosity Pa*s
+    rho = 1000.0 # Density kg/m^3
+    reynolds = (rho*inlet_velocity*geometry_length)/mu
+    print(f"Reynolds number: {reynolds}")
+    
+    # Define functions
     def f(x, y): return (x, 0)
-
+    
+    def inlet_velocity_profile(y):
+        y_min = 0.0
+        y_max = geometry_length
+        U_max = inlet_velocity
+        return 40 * U_max * (y - y_min) * (y_max - y) / ((y_max - y_min)**2)
 
     # Create mesh
-    create_mesh(0.1, "square_with_hole.msh")
+    create_mesh(geometry_length, mesh_size, "square_with_hole.msh")
     raw_mesh = meshio.read("square_with_hole.msh")
     mesh = load_mesh(raw_mesh)
+    mesh.mesh_size = mesh_size  # manually attach it
 
     # Setup and run simulation
-    sim = Simulation(mesh, f)
+    sim = Simulation(mesh, f, mu=mu, rho=rho, inlet_velocity_profile=inlet_velocity_profile)
     sim.run()
+    
+    # Save the entire Simulation object
+    desc = sim.get_description()
+    safe_desc = desc.replace(" ", "_").replace(",", "").replace("=", "").replace(".", "p")
+    sim.save(f"simulations/sim_{safe_desc}.pkl")
