@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environments
+FEM_env/
+.env/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE / Editor folders
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Mesh / Binary Files
+*.msh
+*.pkl
+
+# Misc
+*.log
+*.bak
