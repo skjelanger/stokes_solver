@@ -16,21 +16,19 @@ import scipy.linalg
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
-#from sksparse.cholmod import cholesky, analyze_AAt
-#from scipy.sparse import csc_matrix
-
 from mesher import create_mesh, load_mesh
 from datetime import datetime
 
 
 class Simulation:
-    def __init__(self, mesh, f, mu=0.001, rho=1000.0, inlet_velocity_profile=None):
+    def __init__(self, mesh, f, mu=0.001, rho=1000.0, inlet_pressure=200000, outlet_pressure=100000):
         self.mesh = mesh
         self.f = f
         self.mu = mu
         self.rho = rho
-        self.inlet_velocity_profile = inlet_velocity_profile
-
+        
+        self.inlet_pressure = inlet_pressure
+        self.outlet_pressure = outlet_pressure
 
         self.u1 = None
         self.u2 = None
@@ -101,8 +99,14 @@ class Simulation:
     
         print("Assembling system...", end="", flush=True)
         self.assemble()
-        print(" done.")
-    
+        end_assemble = datetime.now()
+        print(f"\rAssembled system in {(end_assemble - total_start).total_seconds():.3f} seconds.")
+        
+        print("Debugging system...", end="", flush=True)
+        self.debug_system()
+        end_debug = datetime.now()
+        print(f"\rDebugged system in {(end_debug - end_assemble).total_seconds():.3f} seconds.")
+
         print("Solving system...", end="", flush=True)
         self.solve()
         end_solver = datetime.now()
@@ -126,18 +130,17 @@ class Simulation:
     def apply_boundary_conditions(self):
         """
         Modifies the system matrix (lhs) and RHS vector (rhs) to apply:
-        - No-slip condition on boundary (v = 0)
-        - Parabolic inflow on inlet
-        - Pressure fixing on outlet
-    
+        - No-slip condition on walls (v = 0)
+        - Pressure at inlet
+        - Pressure at outlet
         """
         n = self.mesh.nodes.shape[0]
         m = len(self.mesh.pressure_nodes)
         lhs = self.lhs
         rhs = self.rhs
         mesh = self.mesh
-            
-        # --- No-slip walls (v = 0)
+    
+        # --- No-slip walls (velocity = 0)
         for edge in mesh.boundary_edges:
             for node in edge:
                 # x-velocity
@@ -154,33 +157,74 @@ class Simulation:
                 rhs[node_y] = 0
     
         # --- Fix pressure at outlet
-        pressure_dofs_on_outlet = []
+        pressure_dofs_on_outlet = set()
         for edge in mesh.outlet_edges:
             for node in edge:
                 if node in mesh.pressure_index_map:
-                    pressure_dofs_on_outlet.append(mesh.pressure_index_map[node])
+                    pressure_dofs_on_outlet.add(mesh.pressure_index_map[node])
+        
+        for pdof in pressure_dofs_on_outlet:
+            pdof_outlet = 2 * n + pdof
+            lhs[pdof_outlet, :] = 0
+            lhs[:, pdof_outlet] = 0
+            lhs[pdof_outlet, pdof_outlet] = 1
+            rhs[pdof_outlet] = self.outlet_pressure
     
-        if pressure_dofs_on_outlet:
-            pdof = 2 * n + pressure_dofs_on_outlet[0]
-            lhs[pdof, :] = 0
-            lhs[:, pdof] = 0
-            lhs[pdof, pdof] = 1
-            rhs[pdof] = 0
-    
+        # --- Set pressure at inlet
+        pressure_dofs_on_inlet = set()
         for edge in mesh.inlet_edges:
             for node in edge:
-                y = mesh.nodes[node][1]
-                ux = self.inlet_velocity_profile(y)
-    
-                lhs[node, :] = 0
-                lhs[:, node] = 0
-                lhs[node, node] = 1
-                rhs[node] = ux
-    
-                lhs[node + n, :] = 0
-                lhs[:, node + n] = 0
-                lhs[node + n, node + n] = 1
-                rhs[node + n] = 0        
+                if node in mesh.pressure_index_map:
+                    pressure_dofs_on_inlet.add(mesh.pressure_index_map[node])
+        
+        for pdof in pressure_dofs_on_inlet:
+            pdof_index = 2 * n + pdof
+            lhs[pdof_index, :] = 0
+            lhs[:, pdof_index] = 0
+            lhs[pdof_index, pdof_index] = 1
+            rhs[pdof_index] = self.inlet_pressure
+
+    def debug_system(self, tol=1e-12):
+        """
+        Debugs the assembled linear system by checking:
+          - matrix shape
+          - symmetry
+          - sparsity
+          - numerical rank
+        
+        Parameters
+        ----------
+        tol : float
+            Tolerance for rank deficiency detection.
+        """
+        print("\n--- System Debug Info ---")
+        print(f"LHS shape: {self.lhs_scr.shape}")
+        print(f"RHS shape: {self.rhs.shape}")
+        
+        # Check symmetry
+        asymmetry = (self.lhs_scr - self.lhs_scr.T).nnz
+        if asymmetry == 0: 
+            print("Matrix is exactly symmetric.")
+        else:
+            print(f"Matrix is NOT symmetric! Nonzero entries in (A - A^T): {asymmetry}")
+
+        # Check numerical rank
+        print("Checking numerical rank (this can be slow for large systems)...")
+        try:
+            # Compute A*A^T and use sparse QR
+            AtA = self.lhs_scr @ self.lhs_scr.T
+            diag = AtA.diagonal()
+            numerical_rank = np.sum(np.abs(diag) > tol)
+            print(f"Numerical rank estimate: {numerical_rank} / {self.lhs_scr.shape[0]}")
+        except Exception as e:
+            print(f"Rank check failed: {e}")
+        
+        # Print matrix density
+        nnz = self.lhs_scr.nnz
+        total = np.prod(self.lhs_scr.shape)
+        print(f"Matrix sparsity: {100*nnz/total:.2f}% nonzero entries.")
+        print("--- End Debug Info ---\n")
+        
 
 def LoadAssembler2D(nodes, triangles, f):
     """
@@ -443,96 +487,16 @@ def localDivergenceMatrix2D(nodes, triangle):
 
     return -B1_local, -B2_local
 
-
-def sparse_qr_rank_check(A, tol=1e-12):
-    A = csc_matrix(A)      # Ensure CSC format
-    AAt = A @ A.T          # Works even if A is rectangular
-    factor = analyze_AAt(AAt)
-    rank = factor.rank
-    return rank
-
-def get_dependent_column_indices_qr(A, tol=1e-12):
-    """
-    Computationally expensive!
-    Legacy function
-
-    """
-    Q, R, P = scipy.linalg.qr(A, pivoting=True)
-    rank = np.sum(np.abs(np.diag(R)) > tol)
-    dependent_cols = P[rank:]
-    return dependent_cols, rank
-
-def debug_dependent_columns(dependent_cols, nodes, n, m):
-    summary = {"u1": 0, "u2": 0, "p": 0}
-    print(f"Found {len(dependent_cols)} dependent DOFs:")
-    for col in dependent_cols:
-        if col < n:  # DOF type is u1
-            node_id = col
-            coord = nodes[node_id][:2]
-            summary["u1"] += 1
-            print(f"  [u1] node {node_id:4d} at {coord}")
-            
-        elif col < 2 * n: # DOF type is u2
-            node_id = col - n
-            coord = nodes[node_id][:2]
-            summary["u2"] += 1
-            print(f"  [u2] node {node_id:4d} at {coord}")
-            
-        elif col < 2 * n + m:  # DOF type is pressure
-            tri_id = col - 2 * n
-            summary["p"] += 1
-            print(f"  [ p] pressure DOF {tri_id:4d}")
-            
-        else:
-            print(f"  [??] col {col} is out of expected range.")
-
-    print(f"Summary: {summary['u1']} u1, {summary['u2']} u2, {summary['p']} pressure")
-
-def plot_dependent_dofs(nodes, triangles, dependent_indices, n):
-    plt.figure(figsize=(6, 6))
-    
-    # Plot base mesh
-    triangles_P1 = triangles[:, :3]  # Keep only the first 3 vertices of each P2 triangle
-    t = mtri.Triangulation(nodes[:, 0], nodes[:, 1], triangles_P1)   
-    plt.triplot(t, color="lightgray", linewidth=0.5)
-    
-    # Separate dependent indices
-    u1_indices = [i for i in dependent_indices if i < n]
-    u2_indices = [i - n for i in dependent_indices if n <= i < 2 * n]
-    p_indices = [i - 2 * n for i in dependent_indices if i >= 2 * n]
-
-    # Plot u1/u2 nodes
-    if u1_indices:
-        coords = nodes[u1_indices]
-        plt.scatter(coords[:, 0], coords[:, 1], color="blue", label="u1 (x) dependent", marker='x')
-
-    if u2_indices:
-        coords = nodes[u2_indices]
-        plt.scatter(coords[:, 0], coords[:, 1], color="green", label="u2 (y) dependent", marker='x')
-
-    # Plot pressure DOFs (centroid of triangle)
-    if p_indices:
-        centroids = np.mean(nodes[triangles[p_indices]], axis=1)
-        plt.scatter(centroids[:, 0], centroids[:, 1], color="red", label="p dependent", marker='o', edgecolor="k")
-
-    handles, labels = plt.gca().get_legend_handles_labels()
-    if handles:
-        plt.legend(handles, labels, loc="best")    
-    plt.gca().set_aspect("equal")
-    plt.title("Dependent DOFs in Mesh")
-    plt.tight_layout()
-    plt.show()
-
 def plot_velocity_magnitude(mesh, u1, u2, title_suffix=""):
     magnitude = np.sqrt(u1**2 + u2**2)
     plt.figure(figsize=(6, 5))
     triangles_P1 = mesh.triangles[:, :3]
-    t = mtri.Triangulation(mesh.nodes[:, 0], mesh.nodes[:, 1], triangles_P1)
+    t = mtri.Triangulation(mesh.nodes[:, 0] *1000, mesh.nodes[:, 1]*1000, triangles_P1) # Scaling from m to mm
     plt.tripcolor(t, magnitude, shading='flat', cmap='viridis', edgecolors='k', linewidth=0.1)
     
     plt.title(f"Velocity Magnitude [m/s]\n{title_suffix}")
-    plt.xlabel("x [m]")
-    plt.ylabel("y [m]")
+    plt.xlabel("x [mm]")
+    plt.ylabel("y [mm]")
     plt.colorbar(label=r"$|u|$ [m/s]")
     plt.tight_layout()
 
@@ -547,24 +511,23 @@ def plot_velocity_magnitude(mesh, u1, u2, title_suffix=""):
     print(f"Min velocity magnitude: {np.min(magnitude):.4f} m/s")
 
     return magnitude
-
     
 def plot_pressure(mesh, pressure, title_suffix=""):
     plt.figure(figsize=(6, 5))
-    vertex_coords = mesh.nodes[mesh.pressure_nodes]
+    vertex_coords = mesh.nodes[mesh.pressure_nodes] 
     old_to_new = {old: new for new, old in enumerate(mesh.pressure_nodes)}
     triangles_p1 = np.array([
         [old_to_new[i] for i in tri[:3]]
         for tri in mesh.triangles
         if all(i in old_to_new for i in tri[:3])
     ])
-    t = mtri.Triangulation(vertex_coords[:, 0], vertex_coords[:, 1], triangles_p1)
+    t = mtri.Triangulation(vertex_coords[:, 0]*1000, vertex_coords[:, 1]*1000, triangles_p1) # Scaling from m to mm
     plt.tripcolor(t, pressure, shading='gouraud', cmap='coolwarm', edgecolors='k')
     
     plt.title(f"Pressure Field (P1) [Pa]\n{title_suffix}")
     plt.colorbar(label=r"$p$ [Pa]")
-    plt.xlabel("x [m]")
-    plt.ylabel("y [m]")
+    plt.xlabel("x [mm]")
+    plt.ylabel("y [mm]")
     plt.gca().set_aspect("equal")
     plt.tight_layout()
 
@@ -576,9 +539,7 @@ def plot_pressure(mesh, pressure, title_suffix=""):
     # --- NEW: Print some useful statistics ---
     print(f"Max pressure: {np.max(pressure):.4f} Pa")
     print(f"Min pressure: {np.min(pressure):.4f} Pa")
-
-    
-    
+   
     
 def load_simulation(filename):
     """
@@ -634,22 +595,15 @@ if __name__ == "__main__":
     os.makedirs("simulations", exist_ok=True)
     
     # Define constants
-    geometry_length = 0.001 # meters
+    geometry_length = 0.01 # meters
     mesh_size = geometry_length * 0.1 # meters
-    inlet_velocity = 1 # m/s
+    inlet_pressure = 500000 # Pa
+    outlet_pressure = 100000 #Pa
     mu = 0.001 # Viscosity Pa*s
     rho = 1000.0 # Density kg/m^3
-    reynolds = (rho*inlet_velocity*geometry_length)/mu
-    print(f"Reynolds number: {reynolds}")
     
-    # Define functions
-    def f(x, y): return (x, 0)
-    
-    def inlet_velocity_profile(y):
-        y_min = 0.0
-        y_max = geometry_length
-        U_max = inlet_velocity
-        return 40 * U_max * (y - y_min) * (y_max - y) / ((y_max - y_min)**2)
+    # Body forces
+    def f(x, y): return (1, 1)
 
     # Create mesh
     create_mesh(geometry_length, mesh_size, "square_with_hole.msh")
@@ -658,7 +612,7 @@ if __name__ == "__main__":
     mesh.mesh_size = mesh_size  # manually attach it
 
     # Setup and run simulation
-    sim = Simulation(mesh, f, mu=mu, rho=rho, inlet_velocity_profile=inlet_velocity_profile)
+    sim = Simulation(mesh, f, mu=mu, rho=rho, inlet_pressure = inlet_pressure, outlet_pressure = outlet_pressure)
     sim.run()
     
     # Save the entire Simulation object
