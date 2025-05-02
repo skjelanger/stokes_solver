@@ -11,7 +11,6 @@ import meshio
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
-import scipy.linalg
 
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
@@ -21,13 +20,13 @@ from datetime import datetime
 
 
 class Simulation:
-    def __init__(self, mesh, f, mu=0.001, rho=1000.0, inlet_pressure=200000, outlet_pressure=100000):
+    def __init__(self, mesh, f, velocity_inlet_profile, mu=0.001, rho=1000.0, outlet_pressure=100000):
         self.mesh = mesh
         self.f = f
         self.mu = mu
         self.rho = rho
         
-        self.inlet_pressure = inlet_pressure
+        self.velocity_inlet_profile = velocity_inlet_profile
         self.outlet_pressure = outlet_pressure
 
         self.u1 = None
@@ -156,33 +155,39 @@ class Simulation:
                 lhs[node_y, node_y] = 1
                 rhs[node_y] = 0
     
-        # --- Fix pressure at outlet
-        pressure_dofs_on_outlet = set()
-        for edge in mesh.outlet_edges:
-            for node in edge:
-                if node in mesh.pressure_index_map:
-                    pressure_dofs_on_outlet.add(mesh.pressure_index_map[node])
-        
-        for pdof in pressure_dofs_on_outlet:
-            pdof_outlet = 2 * n + pdof
-            lhs[pdof_outlet, :] = 0
-            lhs[:, pdof_outlet] = 0
-            lhs[pdof_outlet, pdof_outlet] = 1
-            rhs[pdof_outlet] = self.outlet_pressure
+
     
-        # --- Set pressure at inlet
-        pressure_dofs_on_inlet = set()
-        for edge in mesh.inlet_edges:
-            for node in edge:
-                if node in mesh.pressure_index_map:
-                    pressure_dofs_on_inlet.add(mesh.pressure_index_map[node])
+        # --- Fix pressure at one arbitrary node (to remove null space)
+        if len(mesh.pressure_nodes) > 0:
+            anchor_node = mesh.pressure_nodes[0]
+            anchor_dof = 2 * n + mesh.pressure_index_map[anchor_node]
+            lhs[anchor_dof, :] = 0
+            lhs[:, anchor_dof] = 0
+            lhs[anchor_dof, anchor_dof] = 1
+            rhs[anchor_dof] = 0
+    
+        # --- Set velocity at inlet using self.velocity_inlet_profile
+        if self.velocity_inlet_profile is not None:
+            for edge in mesh.inlet_edges:
+                for node in edge:
+                    x, y = mesh.nodes[node, :2]
+                    u_inlet, v_inlet = self.velocity_inlet_profile(x, y)
         
-        for pdof in pressure_dofs_on_inlet:
-            pdof_index = 2 * n + pdof
-            lhs[pdof_index, :] = 0
-            lhs[:, pdof_index] = 0
-            lhs[pdof_index, pdof_index] = 1
-            rhs[pdof_index] = self.inlet_pressure
+                    # x-component
+                    lhs[node, :] = 0
+                    lhs[:, node] = 0
+                    lhs[node, node] = 1
+                    rhs[node] = u_inlet
+        
+                    # y-component
+                    node_y = node + n
+                    lhs[node_y, :] = 0
+                    lhs[:, node_y] = 0
+                    lhs[node_y, node_y] = 1
+                    rhs[node_y] = v_inlet
+    
+        else:
+            print("Warning, no velocity profile found.")
 
     def debug_system(self, tol=1e-12):
         """
@@ -224,7 +229,6 @@ class Simulation:
         total = np.prod(self.lhs_scr.shape)
         print(f"Matrix sparsity: {100*nnz/total:.2f}% nonzero entries.")
         print("--- End Debug Info ---\n")
-        
 
 def LoadAssembler2D(nodes, triangles, f):
     """
@@ -597,13 +601,18 @@ if __name__ == "__main__":
     # Define constants
     geometry_length = 0.01 # meters
     mesh_size = geometry_length * 0.1 # meters
-    inlet_pressure = 500000 # Pa
-    outlet_pressure = 100000 #Pa
+    outlet_pressure = 0 #Pa
     mu = 0.001 # Viscosity Pa*s
     rho = 1000.0 # Density kg/m^3
     
     # Body forces
-    def f(x, y): return (1, 1)
+    def f(x, y): return (1, 0)
+    
+    def velocity_inlet_profile(x, y):
+        height = geometry_length  # match geometry height (in meters)
+        u = 0.2 * 4 * (y / height) * (1 - y / height)  # max velocity at center
+        v = 0.0
+        return u, v
 
     # Create mesh
     create_mesh(geometry_length, mesh_size, "square_with_hole.msh")
@@ -612,7 +621,8 @@ if __name__ == "__main__":
     mesh.mesh_size = mesh_size  # manually attach it
 
     # Setup and run simulation
-    sim = Simulation(mesh, f, mu=mu, rho=rho, inlet_pressure = inlet_pressure, outlet_pressure = outlet_pressure)
+    sim = Simulation(mesh, f, velocity_inlet_profile,
+                     mu=mu, rho=rho, outlet_pressure=outlet_pressure)
     sim.run()
     
     # Save the entire Simulation object

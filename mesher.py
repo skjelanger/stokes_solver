@@ -56,55 +56,67 @@ class Mesh:
         self.pressure_index_map = pressure_index_map
 
         
-    def plot(self, show_node_ids=True, filename="mesh_plot.png"):
+    def plot(self, show_node_ids=False, filename="mesh_plot.png"):
         """
         Plot the mesh with color-coded edge types and node labels.
-
+    
         Parameters
         ----------
         show_node_ids : bool, optional
             Whether to annotate nodes with their indices. Default is True.
-
+    
         filename : str, optional
             Filename to save the plot. Default is "mesh_plot.png".
-
+    
         Returns
         -------
         None
         """
+        start_plot = datetime.now()
+    
         print("Plotting mesh...", end="", flush=True)
-
+    
         plt.figure(figsize=(6, 6))
-
+    
+        def scale_coords(coord):
+            return coord * 1000  # convert meters to millimeters
+    
         if show_node_ids:
             for idx, (xi, yi) in enumerate(self.nodes[:, :2]):
-                plt.scatter(xi, yi, color='C4', s=5, zorder=5)
-                plt.text(xi+0.01, yi+0.01, str(idx), fontsize=6,
+                xi_mm, yi_mm = scale_coords(xi), scale_coords(yi)
+                plt.scatter(xi_mm, yi_mm, color='C4', s=5, zorder=5)
+                plt.text(xi_mm, yi_mm, str(idx), fontsize=6, zorder=6,
                          color='black', ha='center', va='center')
-
+    
         def draw_edges(edges, color, label):
             for edge in edges:
                 p1, p2 = self.nodes[edge[0]], self.nodes[edge[1]]
-                plt.plot([p1[0], p2[0]], [p1[1], p2[1]], color, linewidth=1.2, label=label)
-
+                x_vals = [scale_coords(p1[0]), scale_coords(p2[0])]
+                y_vals = [scale_coords(p1[1]), scale_coords(p2[1])]
+                plt.plot(x_vals, y_vals, color, linewidth=1.2, label=label)
+    
         draw_edges(self.interior_edges, 'C0', 'Interior')
         draw_edges(self.boundary_edges, 'C1', 'Boundary')
         draw_edges(self.inlet_edges, 'C2', 'Inlet')
         draw_edges(self.outlet_edges, 'C3', 'Outlet')
-
+    
         # Remove duplicate labels
         handles, labels = plt.gca().get_legend_handles_labels()
         by_label = dict(zip(labels, handles))
         plt.legend(by_label.values(), by_label.keys(), loc='center')
-
+    
+        plt.xlabel("x [mm]")
+        plt.ylabel("y [mm]")
         plt.gca().set_aspect("equal")
         plt.title("M*E*S*H*")
         plt.tight_layout()
         plt.savefig(filename, dpi=300)
         plt.show()
-        
+    
+        end_plot = datetime.now()
+        print(f"\rPlotted mesh in {(end_plot - start_plot).total_seconds():.3f} seconds.")
         print(f"Mesh plot saved as {filename}.")
-        return
+
 
 def create_mesh(geometry_length=0.01, mesh_size=0.0001, output_file="square_with_hole.msh"):
     """
@@ -221,7 +233,7 @@ def load_mesh(mesh=None):
     triangles = np.array([[index_map[i] for i in tri] for tri in triangles])
 
 
-    # Classify edges
+    # Classify edges by counting how many times they appear
     edge_list = defaultdict(int)
     for tri in triangles:
         edges = [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])]
@@ -237,10 +249,11 @@ def load_mesh(mesh=None):
         if count == 1:  # boundary edge
             p1, p2 = nodes[edge[0]], nodes[edge[1]]
             x1, x2 = p1[0], p2[0]
-
+            
+            xmax = np.max(nodes)
             if np.isclose(x1, 0.0) and np.isclose(x2, 0.0):
                 inlet_edges.append(edge)
-            elif np.isclose(x1, 1.0) and np.isclose(x2, 1.0):
+            elif np.isclose(x1, xmax) and np.isclose(x2, xmax):
                 outlet_edges.append(edge)
             else:
                 boundary_edges.append(edge)

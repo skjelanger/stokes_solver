@@ -30,6 +30,8 @@ Thumbs.db
 
 # Ignore plots
 plots/
+.png
+.jpg
 
 # Ignore simulations
 simulations/
