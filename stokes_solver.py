@@ -144,7 +144,8 @@ class Simulation:
         desc = self.get_description()
         plot_velocity_magnitude(self.mesh, self.u1, self.u2, title_suffix=desc)
         plot_pressure(self.mesh, self.p, title_suffix=desc)
-        
+        plot_velocity_vectors(self.mesh, self.u1, self.u2, title_suffix=desc) 
+
         
     def apply_boundary_conditions(self):
         """
@@ -552,7 +553,37 @@ def plot_pressure(mesh, pressure, title_suffix=""):
     # --- NEW: Print some useful statistics ---
     print(f"Max pressure: {np.max(pressure):.4f} Pa")
     print(f"Min pressure: {np.min(pressure):.4f} Pa")
-   
+    return
+
+def plot_velocity_vectors(mesh, u1, u2, title_suffix=""):
+    x = mesh.nodes[:, 0] * 1000  # mm
+    y = mesh.nodes[:, 1] * 1000
+    u = u1
+    v = u2
+
+    magnitude = np.sqrt(u**2 + v**2)
+    nonzero = magnitude > 1e-12  # Avoid division by zero
+    u_norm = np.zeros_like(u)
+    v_norm = np.zeros_like(v)
+    u_norm[nonzero] = u[nonzero] / magnitude[nonzero]
+    v_norm[nonzero] = v[nonzero] / magnitude[nonzero]
+
+    plt.figure(figsize=(6, 5))
+    quiv = plt.quiver(x, y, u_norm, v_norm, magnitude, angles='xy',
+                      scale_units='xy', cmap='viridis', width=0.005)
+
+    plt.colorbar(quiv, label='Velocity Magnitude [m/s]')
+    plt.title(f"Velocity Direction (colored by magnitude)\n{title_suffix}")
+    plt.xlabel("x [mm]")
+    plt.ylabel("y [mm]")
+    plt.gca().set_aspect("equal")
+    plt.tight_layout()
+
+    safe_desc = title_suffix.replace(" ", "_").replace(",", "").replace("=", "").replace(".", "p")
+    plt.savefig(f"plots/velocity_vectors_colored_{safe_desc}.png", dpi=300)
+    plt.show()
+    plt.close()
+    return
     
 def load_simulation(filename):
     """
@@ -609,7 +640,7 @@ if __name__ == "__main__":
     
     # Define constants
     geometry_length = 0.01 # meters
-    mesh_size = geometry_length * 0.1 # meters
+    mesh_size = geometry_length * 0.05 # meters
     outlet_pressure = 0 #Pa
     mu = 0.001 # Viscosity Pa*s
     rho = 1000.0 # Density kg/m^3
