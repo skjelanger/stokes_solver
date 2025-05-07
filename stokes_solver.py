@@ -615,7 +615,7 @@ if __name__ == "__main__":
     rho = 1000.0 # Density kg/m^3
     
     # Body forces
-    def f(x, y): return (1, -1)
+    def f(x, y): return (0, -1)
     
     def velocity_inlet_profile(x, y):
         height = geometry_length  # match geometry height (in meters)

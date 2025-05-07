@@ -166,14 +166,25 @@ def create_mesh(geometry_length=0.01, mesh_size=0.0001, output_file="square_with
 
     # --- Add periodicity: bottom (l1) is master, top (l3) is slave ---
     gmsh.model.mesh.setPeriodic(
-        1,  # dimension of the entity (1D = curves)
-        [l3],  # slave curve(s) = top
-        [l1],  # master curve(s) = bottom
-        [1, 0, 0, 0,   # row 1
-         0, 1, 0, -l,  # row 2: y shifted by -l
-         0, 0, 1, 0,   # row 3
-         0, 0, 0, 1]   # row 4
-    )  
+        1,      # 1D entities (curves)
+        [l3],   # slave: top boundary curve
+        [l1],   # master: bottom boundary curve
+        [1, 0, 0, 0,     # x' = x
+         0, 1, 0, -l,    # y' = y - l → shift top to align with bottom
+         0, 0, 1, 0,     # z unchanged
+         0, 0, 0, 1]     # homogeneous coordinate
+    )
+    
+    # --- Add periodicity: left (l4) is master, right (l2) is slave ---
+    gmsh.model.mesh.setPeriodic(
+        1,      # 1D entities (curves)
+        [l2],   # slave: right
+        [l4],   # master: left
+        [1, 0, 0, -l,    # x' = x - l
+         0, 1, 0, 0,     # y' = y
+         0, 0, 1, 0,     # z unchanged
+         0, 0, 0, 1]     # homogeneous coordinate
+    )
 
     square_loop = gmsh.model.occ.addCurveLoop([l1, l2, l3, l4])
     square_surface = gmsh.model.occ.addPlaneSurface([square_loop])
