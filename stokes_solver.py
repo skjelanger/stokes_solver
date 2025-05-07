@@ -138,9 +138,9 @@ class Simulation:
         lhs = self.lhs
         rhs = self.rhs
         mesh = self.mesh
-    
-        # --- No-slip walls (velocity = 0)
-        for edge in mesh.boundary_edges:
+        
+        # --- No-slip walls on interior boundary (velocity = 0)
+        for edge in mesh.interior_boundary_edges:
             for node in edge:
                 # x-velocity
                 lhs[node, :] = 0
@@ -156,7 +156,6 @@ class Simulation:
                 rhs[node_y] = 0
     
 
-    
         # --- Fix pressure at one arbitrary node (to remove null space)
         if len(mesh.pressure_nodes) > 0:
             anchor_node = mesh.pressure_nodes[0]
@@ -165,29 +164,6 @@ class Simulation:
             lhs[:, anchor_dof] = 0
             lhs[anchor_dof, anchor_dof] = 1
             rhs[anchor_dof] = 0
-    
-        # --- Set velocity at inlet using self.velocity_inlet_profile
-        if self.velocity_inlet_profile is not None:
-            for edge in mesh.inlet_edges:
-                for node in edge:
-                    x, y = mesh.nodes[node, :2]
-                    u_inlet, v_inlet = self.velocity_inlet_profile(x, y)
-        
-                    # x-component
-                    lhs[node, :] = 0
-                    lhs[:, node] = 0
-                    lhs[node, node] = 1
-                    rhs[node] = u_inlet
-        
-                    # y-component
-                    node_y = node + n
-                    lhs[node_y, :] = 0
-                    lhs[:, node_y] = 0
-                    lhs[node_y, node_y] = 1
-                    rhs[node_y] = v_inlet
-    
-        else:
-            print("Warning, no velocity profile found.")
 
     def debug_system(self, tol=1e-12):
         """
@@ -606,7 +582,7 @@ if __name__ == "__main__":
     rho = 1000.0 # Density kg/m^3
     
     # Body forces
-    def f(x, y): return (1, 0)
+    def f(x, y): return (0, -1)
     
     def velocity_inlet_profile(x, y):
         height = geometry_length  # match geometry height (in meters)

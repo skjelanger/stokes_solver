@@ -44,18 +44,23 @@ class Mesh:
         Maps global node index to pressure DOF index.
     """
 
-    def __init__(self, nodes, triangles, interior_edges, boundary_edges, inlet_edges, 
-                 outlet_edges, pressure_nodes, pressure_index_map):
+    def __init__(self, nodes, triangles, interior_edges,pressure_nodes, pressure_index_map, 
+                 interior_boundary_edges=None, exterior_boundary_edges=None, 
+                 inlet_edges=None, 
+                 outlet_edges=None,
+                 periodic_map=None):
         self.nodes = nodes
         self.triangles = triangles
         self.interior_edges = interior_edges
-        self.boundary_edges = boundary_edges
-        self.inlet_edges = inlet_edges
-        self.outlet_edges = outlet_edges
+        self.interior_boundary_edges = interior_boundary_edges or []
+        self.exterior_boundary_edges = exterior_boundary_edges or []        
+        self.inlet_edges = inlet_edges or []
+        self.outlet_edges = outlet_edges or []
         self.pressure_nodes = pressure_nodes
         self.pressure_index_map = pressure_index_map
+        self.periodic_map = periodic_map or {}
 
-        
+
     def plot(self, show_node_ids=False, filename="mesh_plot.png"):
         """
         Plot the mesh with color-coded edge types and node labels.
@@ -96,9 +101,11 @@ class Mesh:
                 plt.plot(x_vals, y_vals, color, linewidth=1.2, label=label)
     
         draw_edges(self.interior_edges, 'C0', 'Interior')
-        draw_edges(self.boundary_edges, 'C1', 'Boundary')
-        draw_edges(self.inlet_edges, 'C2', 'Inlet')
-        draw_edges(self.outlet_edges, 'C3', 'Outlet')
+        draw_edges(self.interior_boundary_edges, 'C1', 'Interior wall')
+        draw_edges(self.exterior_boundary_edges, 'C2', 'Exterior wall')
+        #draw_edges(self.inlet_edges, 'C3', 'Inlet')
+        #draw_edges(self.outlet_edges, 'C4', 'Outlet')
+
     
         # Remove duplicate labels
         handles, labels = plt.gca().get_legend_handles_labels()
@@ -153,6 +160,20 @@ def create_mesh(geometry_length=0.01, mesh_size=0.0001, output_file="square_with
     l2 = gmsh.model.occ.addLine(s_p2, s_p3)  # right
     l3 = gmsh.model.occ.addLine(s_p3, s_p4)  # top
     l4 = gmsh.model.occ.addLine(s_p4, s_p1)  # left
+    
+    
+    gmsh.model.occ.synchronize()
+
+    # --- Add periodicity: bottom (l1) is master, top (l3) is slave ---
+    gmsh.model.mesh.setPeriodic(
+        1,  # dimension of the entity (1D = curves)
+        [l3],  # slave curve(s) = top
+        [l1],  # master curve(s) = bottom
+        [1, 0, 0, 0,   # row 1
+         0, 1, 0, -l,  # row 2: y shifted by -l
+         0, 0, 1, 0,   # row 3
+         0, 0, 0, 1]   # row 4
+    )  
 
     square_loop = gmsh.model.occ.addCurveLoop([l1, l2, l3, l4])
     square_surface = gmsh.model.occ.addPlaneSurface([square_loop])
@@ -182,6 +203,7 @@ def create_mesh(geometry_length=0.01, mesh_size=0.0001, output_file="square_with
     gmsh.model.mesh.setOrder(2)  # Make sure this is BEFORE generate()
     gmsh.option.setNumber("Mesh.ElementOrder", 2)  # optional, reinforces the intent
     gmsh.option.setNumber("Mesh.SecondOrderIncomplete", 0)  # use complete P2 elements
+        
     gmsh.model.mesh.generate(2)
 
     gmsh.write(output_file)
@@ -241,12 +263,14 @@ def load_mesh(mesh=None):
             edge_list[tuple(sorted(edge))] += 1
 
     interior_edges = []
-    boundary_edges = []
+    interior_boundary_edges = []
+    exterior_boundary_edges = []
     inlet_edges = []
     outlet_edges = []
 
     for edge, count in edge_list.items():
         if count == 1:  # boundary edge
+            # First  check if inlet or outlet
             p1, p2 = nodes[edge[0]], nodes[edge[1]]
             x1, x2 = p1[0], p2[0]
             
@@ -255,8 +279,21 @@ def load_mesh(mesh=None):
                 inlet_edges.append(edge)
             elif np.isclose(x1, xmax) and np.isclose(x2, xmax):
                 outlet_edges.append(edge)
+            
+            # Then check if interior or exterior
+            margin = 1e-7  # numerical tolerance
+            xc = (p1[0] + p2[0]) / 2
+            yc = (p1[1] + p2[1]) / 2
+            xmin, xmax = np.min(nodes[:, 0]), np.max(nodes[:, 0])
+            ymin, ymax = np.min(nodes[:, 1]), np.max(nodes[:, 1])
+            
+            if (np.isclose(xc, xmin, atol=margin) or
+                np.isclose(xc, xmax, atol=margin) or
+                np.isclose(yc, ymin, atol=margin) or
+                np.isclose(yc, ymax, atol=margin)):
+                exterior_boundary_edges.append(edge)
             else:
-                boundary_edges.append(edge)
+                interior_boundary_edges.append(edge)
         elif count == 2:
             interior_edges.append(edge)  
         else:
@@ -266,17 +303,33 @@ def load_mesh(mesh=None):
     pressure_nodes = triangles[:, :3].flatten()
     pressure_nodes = np.unique(pressure_nodes)
     pressure_index_map = {node: i for i, node in enumerate(pressure_nodes)}
+    
+    # --- Find periodic node pairs (top ↔ bottom) ---
+    tol = 1e-8
+    y_min = np.min(nodes[:, 1])
+    y_max = np.max(nodes[:, 1])
+
+    top_nodes = [i for i, p in enumerate(nodes) if np.isclose(p[1], y_max, atol=tol)]
+    bottom_nodes = [i for i, p in enumerate(nodes) if np.isclose(p[1], y_min, atol=tol)]
+
+    top_nodes_sorted = sorted(top_nodes, key=lambda i: nodes[i][0])
+    bottom_nodes_sorted = sorted(bottom_nodes, key=lambda i: nodes[i][0])
+
+    periodic_node_pairs = list(zip(bottom_nodes_sorted, top_nodes_sorted))
+    periodic_map = dict(periodic_node_pairs)
 
     # Initialize mesh class
     mesh = Mesh(
         nodes=nodes,
         triangles=triangles,
+        pressure_nodes=pressure_nodes,
+        pressure_index_map=pressure_index_map,
         interior_edges=interior_edges,
-        boundary_edges=boundary_edges,
+        interior_boundary_edges=interior_boundary_edges,
+        exterior_boundary_edges=exterior_boundary_edges,
         inlet_edges=inlet_edges,
         outlet_edges=outlet_edges,
-        pressure_nodes=pressure_nodes,
-        pressure_index_map=pressure_index_map
+        periodic_map=periodic_map
     )
 
     return mesh
@@ -290,12 +343,13 @@ if __name__ == "__main__":
     
     """
     mesh_file = "square_with_hole.msh"
-    mesh_size = 0.1
+    geometry_length=0.1
+    mesh_size = 0.15 * geometry_length
     
     total_start = datetime.now()
 
     print("Creating mesh...", end="", flush=True)
-    create_mesh(mesh_size, mesh_file)
+    create_mesh(geometry_length, mesh_size, output_file=mesh_file)
 
     print("Loading mesh...", end="", flush=True)
     raw_mesh = meshio.read(mesh_file)
@@ -303,6 +357,6 @@ if __name__ == "__main__":
 
     print("Plotting mesh...", end="", flush=True)
     mesh.plot(show_node_ids=False, filename="mesh.png")
-
+    
     end_mesh = datetime.now()
     print(f"\rMeshed in {(end_mesh - total_start).total_seconds():.3f} seconds")
