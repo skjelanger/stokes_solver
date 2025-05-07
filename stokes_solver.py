@@ -56,10 +56,11 @@ class Simulation:
         nodes = self.mesh.nodes
         triangles = self.mesh.triangles
         pressure_nodes = self.mesh.pressure_nodes
+        periodic_map = self.mesh.periodic_map
 
-        A11 = (self.mu / self.rho) * StiffnessAssembler2D(nodes, triangles)
-        B1, B2 = DivergenceAssembler2D(nodes, triangles, pressure_nodes)
-        b1, b2 = LoadAssembler2D(nodes, triangles, self.f)
+        A11 = (self.mu / self.rho) * StiffnessAssembler2D(nodes, triangles, periodic_map)
+        B1, B2 = DivergenceAssembler2D(nodes, triangles, pressure_nodes, periodic_map)
+        b1, b2 = LoadAssembler2D(nodes, triangles, self.f, periodic_map)
 
 
         B1T = (1 / self.rho) * B1.T
@@ -81,7 +82,20 @@ class Simulation:
         self.rhs = np.concatenate([b1, b2, zero_b])
 
         self.apply_boundary_conditions()
-
+        
+        slave_nodes = set(periodic_map.keys())
+        n = self.mesh.nodes.shape[0]
+        
+        
+        # Remove DOFs for the slave ndoes.
+        for node in slave_nodes:
+            for offset in [0, n]:  # Handle both u1 and u2 velocities
+                dof = node + offset
+                self.lhs[dof, :] = 0
+                self.lhs[:, dof] = 0 
+                self.lhs[dof, dof] = 1 
+                self.rhs[dof] = 0
+                
         self.lhs_scr = self.lhs.tocsr()
         
         
@@ -92,6 +106,12 @@ class Simulation:
         self.u1 = sol[:n]
         self.u2 = sol[n:2*n]
         self.p = sol[2*n:]
+        
+        
+        # Copies the correct velocity from the master to the slave
+        for slave, master in self.mesh.periodic_map.items():
+            self.u1[slave] = self.u1[master]
+            self.u2[slave] = self.u2[master]
 
     def run(self):
         total_start = datetime.now()
@@ -137,11 +157,13 @@ class Simulation:
         m = len(self.mesh.pressure_nodes)
         lhs = self.lhs
         rhs = self.rhs
-        mesh = self.mesh
-        
+        periodic_slaves = set(self.mesh.periodic_map.keys())
+
         # --- No-slip walls on interior boundary (velocity = 0)
         for edge in mesh.interior_boundary_edges:
             for node in edge:
+                if node in periodic_slaves:
+                    continue  # skip: handled by master node
                 # x-velocity
                 lhs[node, :] = 0
                 lhs[:, node] = 0
@@ -158,7 +180,10 @@ class Simulation:
 
         # --- Fix pressure at one arbitrary node (to remove null space)
         if len(mesh.pressure_nodes) > 0:
-            anchor_node = mesh.pressure_nodes[0]
+            for node in mesh.pressure_nodes:
+                if node not in periodic_slaves:
+                    anchor_node = node
+                    break
             anchor_dof = 2 * n + mesh.pressure_index_map[anchor_node]
             lhs[anchor_dof, :] = 0
             lhs[:, anchor_dof] = 0
@@ -206,7 +231,13 @@ class Simulation:
         print(f"Matrix sparsity: {100*nnz/total:.2f}% nonzero entries.")
         print("--- End Debug Info ---\n")
 
-def LoadAssembler2D(nodes, triangles, f):
+
+def canonical_dof(node, periodic_map):
+    """Redirects node to its periodic master if needed."""
+    return periodic_map.get(node, node)
+
+
+def LoadAssembler2D(nodes, triangles, f, periodic_map):
     """
     Assembles the global load vector for a 2D finite element problem using P2 elements.
 
@@ -237,8 +268,9 @@ def LoadAssembler2D(nodes, triangles, f):
     for triangle in triangles:
         b1_local, b2_local = localLoadVector2D(nodes, triangle, f)
         for i in range(6):
-            b1[triangle[i]] += b1_local[i]
-            b2[triangle[i]] += b2_local[i]
+            node = canonical_dof(triangle[i], periodic_map)
+            b1[node] += b1_local[i]
+            b2[node] += b2_local[i]
 
     return b1, b2
 
@@ -296,7 +328,7 @@ def localLoadVector2D(nodes, triangle, f):
 
     return b1_local, b2_local
 
-def StiffnessAssembler2D(nodes, triangles):
+def StiffnessAssembler2D(nodes, triangles, periodic_map):
     """
     Assemble the global stiffness matrix A for a 2D FEM mesh 
     using quadratic basis functions (P2 elements).
@@ -321,8 +353,9 @@ def StiffnessAssembler2D(nodes, triangles):
         A_local = localStiffnessMatrix2D(nodes, triangle)
         for i in range(6):
             for j in range(6):
-                A[triangle[i], triangle[j]] += A_local[i, j]
-
+                i_global = canonical_dof(triangle[i], periodic_map)
+                j_global = canonical_dof(triangle[j], periodic_map)
+                A[i_global, j_global] += A_local[i, j]
     return A
 
 def localStiffnessMatrix2D(nodes, triangle):
@@ -370,7 +403,7 @@ def localStiffnessMatrix2D(nodes, triangle):
 
     return A_local
 
-def DivergenceAssembler2D(nodes, triangles, pressure_nodes):
+def DivergenceAssembler2D(nodes, triangles, pressure_nodes, periodic_map):
     """
     Assembles the global divergence matrices B1 and B2, from P2 velocity degrees 
     of freedom and P1 pressure degrees of freedom. 
@@ -408,7 +441,7 @@ def DivergenceAssembler2D(nodes, triangles, pressure_nodes):
             if p_node in pressure_index_map:
                 p_idx = pressure_index_map[p_node]
                 for j in range(6):
-                    v_node = tri[j]
+                    v_node = canonical_dof(tri[j], periodic_map)
                     B1[p_idx, v_node] += B1_local[i, j]
                     B2[p_idx, v_node] += B2_local[i, j]
 
@@ -582,7 +615,7 @@ if __name__ == "__main__":
     rho = 1000.0 # Density kg/m^3
     
     # Body forces
-    def f(x, y): return (0, -1)
+    def f(x, y): return (1, -1)
     
     def velocity_inlet_profile(x, y):
         height = geometry_length  # match geometry height (in meters)
