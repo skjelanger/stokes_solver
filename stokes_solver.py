@@ -88,11 +88,12 @@ class Simulation:
        Estimates average permeability using average velocity and known body force.
    """
    
-    def __init__(self, mesh, f, inner_radius, geometry_height, mu=0.001, rho=1000.0, ):
+    def __init__(self, mesh, f, geometry_length, inner_radius, geometry_height, mu=0.001, rho=1000.0, ):
         self.mesh = mesh
         self.f = f
         self.mu = mu
         self.rho = rho
+        self.geometry_length= geometry_length
         self.geometry_height = geometry_height
         self.inner_radius = inner_radius
         
@@ -276,7 +277,16 @@ class Simulation:
                 rhs[node_y] = 0.0         # Set RHS to 0
     
         # --- Fix pressure at one arbitrary node (using row modification) ---
-        anchor_node = max(mesh.pressure_nodes, key=lambda idx: mesh.nodes[idx][1]) # Node with highest y
+        # Choose the pressure node closest to y = 0.5 * domain height (and optionally also near x = 0.5)
+        target_y = 0.5 * np.max(self.mesh.nodes[:, 1])
+        target_x = 0.1
+        anchor_node = min(
+            self.mesh.pressure_nodes,
+            key=lambda idx: (self.mesh.nodes[idx][1] - target_y)**2 + (self.mesh.nodes[idx][0] - target_x)**2
+        )
+        
+        print("\rAnchoring using node: ", anchor_node)
+        
         # Find the index of this pressure node within the pressure block (0 to m-1)
         pressure_dof_local = mesh.pressure_index_map[anchor_node]
         # Calculate the global DOF index in the full system matrix (offset by 2*n)
@@ -331,36 +341,39 @@ class Simulation:
 
     def compute_permeability(self, direction='y'):
         """
-        Computes permeability using a simplified method:
-        - Averages the velocity over each triangle
-        - Multiplies by triangle area to get total flow
-        - Uses pseudo-2D/3D scaling with 2/3 factor
+        Computes permeability using Darcy's law with a pressure gradient estimated 
+        from average pressure at top and bottom boundaries, including 2/3 scaling.
         """
-        u = self.u1 if direction == 'x' else self.u2
+        if direction != 'y':
+            raise NotImplementedError("Only vertical permeability (y-direction) is currently supported.")
+    
+        u = self.u2  # vertical velocity component
         nodes = self.mesh.nodes
         triangles = self.mesh.triangles[:, :3]  # Use P1 vertex nodes
+    
+        # --- Compute average vertical velocity over the domain ---
         total_flow = 0.0
         total_area = 0.0
-    
         for tri in triangles:
             coords = nodes[tri, :2]
             v0, v1, v2 = coords
             area = 0.5 * abs((v1[0] - v0[0]) * (v2[1] - v0[1]) - (v1[1] - v0[1]) * (v2[0] - v0[0]))
-    
             avg_u = np.mean(u[tri])  # Average over triangle vertices
             total_flow += avg_u * area
             total_area += area
+        avg_v = total_flow / total_area
     
-        self.avg_velocity = total_flow / total_area
-        
-        print("Avg_velocity: ", float(f"{self.avg_velocity:.4e}"))
-
-        # Apply same pseudo-3D scaling
         f_magnitude = abs(self.f(0, 0)[0 if direction == 'x' else 1])
-        k = (2 / 3) * (self.mu / self.rho / f_magnitude) * abs(self.avg_velocity)
-        
+    
+        # --- Apply Darcy-based permeability formula ---
+        k = (2 / 3) * self.mu * abs(avg_v) / f_magnitude
+    
+        # --- Store and print results ---
+        self.avg_velocity = float(f"{avg_v:.4e}")
         self.permeability = float(f"{k:.4e}")
-        print(f"Permeability: {self.permeability}.")
+    
+        print(f"Avg velocity:     {self.avg_velocity} m/s")
+        print(f"Permeability:     {self.permeability} m²")
         return
 
 
@@ -752,8 +765,8 @@ def plot_pressure(mesh, pressure, title_suffix=""):
     plt.close()
 
     # --- NEW: Print some useful statistics ---
-    print(f"Max pressure: {np.max(pressure):.4f} Pa")
-    print(f"Min pressure: {np.min(pressure):.4f} Pa")
+    print(f"Max pressure: {np.max(pressure):.4e} Pa")
+    print(f"Min pressure: {np.min(pressure):.4e} Pa")
     return
 
 def plot_velocity_vectors(mesh, u1, u2, title_suffix=""):
@@ -850,8 +863,8 @@ if __name__ == "__main__":
     
     # Define constants
     geometry_length = 0.001 # meters 0.001 is 1mm
-    mesh_size = geometry_length * 0.01 # meters
-    inner_radius = geometry_length * 0.35 
+    mesh_size = geometry_length * 0.005# meters
+    inner_radius = geometry_length * 0.49
     geometry_height = 0.000091 # 91 micrometer thickness
     mu = 0.00089 # Viscosity Pa*s
     rho = 1000.0 # Density kg/m^3
@@ -869,7 +882,7 @@ if __name__ == "__main__":
     mesh.check_triangle_orientation()
 
     # Setup and run simulation
-    sim = Simulation(mesh, f, inner_radius, geometry_height, mu=mu, rho=rho)
+    sim = Simulation(mesh, f, geometry_length, inner_radius, geometry_height, mu=mu, rho=rho)
     sim.run()
     
     sim.compute_permeability(direction='y')
