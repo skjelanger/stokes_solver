@@ -18,28 +18,105 @@ import scipy.sparse.linalg as spla
 from mesher import create_mesh, load_mesh
 from datetime import datetime
 
+import pypardiso
+
 
 class Simulation:
-    def __init__(self, mesh, f, velocity_inlet_profile, mu=0.001, rho=1000.0, outlet_pressure=100000):
+    """
+   Simulation of incompressible Stokes flow in a 2D domain with support for
+   periodic boundary conditions and mixed P2-P1 finite elements.
+
+   Attributes
+   ----------
+   mesh : Mesh
+       A structured mesh object containing geometry, connectivity, and boundary classification.
+
+   f : callable
+       Body force function, accepting (x, y) and returning a tuple (fx, fy).
+
+   inner_radius : float
+       Radius of the central hole in the domain geometry.
+
+   mu : float, optional
+       Dynamic viscosity of the fluid [Pa·s]. Default is 0.001.
+
+   rho : float, optional
+       Fluid density [kg/m³]. Default is 1000.
+
+   geometry_height : float
+       Thickness of the pseudo-3D channel, used to scale forces.
+
+   u1, u2 : ndarray or None
+       Computed velocity components after solving.
+
+   p : ndarray or None
+       Computed pressure field after solving.
+
+   lhs, rhs : scipy sparse matrix and ndarray
+       Assembled linear system (before solve).
+
+   Methods
+   -------
+   get_description() -> str
+       Returns a short formatted description string with geometry and material parameters.
+
+   save(filename)
+       Serializes the simulation object to a file using pickle.
+
+   static load(filename) -> Simulation
+       Loads a Simulation object from a pickle file.
+
+   assemble()
+       Builds the global linear system including periodicity enforcement and boundary conditions.
+
+   solve()
+       Solves the Stokes system using Pypardiso and stores velocity and pressure fields.
+
+   run()
+       Executes the full simulation pipeline: assemble → debug → solve → plot.
+
+   plot()
+       Generates and saves plots of velocity magnitude, vectors, and pressure field.
+
+   apply_boundary_conditions()
+       Applies no-slip conditions on walls and anchors the pressure DOF.
+
+   debug_system(tol=1e-12)
+       Checks symmetry, sparsity, and approximate rank of the assembled system.
+
+   compute_permeability(direction='y') -> float
+       Estimates average permeability using average velocity and known body force.
+   """
+   
+    def __init__(self, mesh, f, inner_radius, geometry_height, mu=0.001, rho=1000.0, ):
         self.mesh = mesh
         self.f = f
         self.mu = mu
         self.rho = rho
+        self.geometry_height = geometry_height
+        self.inner_radius = inner_radius
         
-        self.velocity_inlet_profile = velocity_inlet_profile
-        self.outlet_pressure = outlet_pressure
-
         self.u1 = None
         self.u2 = None
         self.p = None
         self.lhs = None
         self.rhs = None
         
-        
     def get_description(self):
-        desc = f"mu={self.mu:.2e}, rho={self.rho:.1f}"
+        desc = ""
+        if self.mu is not None:
+            desc += f"mu={self.mu:.2e}"
+        if self.rho is not None:
+            desc += f", rho={self.rho:.2e}"
         if self.mesh.mesh_size is not None:
-            desc += f", h={self.mesh.mesh_size:.3f}"
+            desc += f", h={self.mesh.mesh_size:.2e}"
+        if self.mesh.triangles is not None:
+            desc += f", n={self.mesh.triangles.shape[0]}"
+        if self.geometry_height is not None:
+            desc += f", t={self.geometry_height:.2e}"
+        if self.inner_radius is not None:
+            desc += f", r={self.inner_radius:.2e}"
+            
         return desc
         
     def save(self, filename):
@@ -51,20 +128,22 @@ class Simulation:
         with open(filename, "rb") as f:
             return pickle.load(f)
 
-
     def assemble(self):
         nodes = self.mesh.nodes
         triangles = self.mesh.triangles
         pressure_nodes = self.mesh.pressure_nodes
         periodic_map = self.mesh.periodic_map
-
-        A11 = (self.mu / self.rho) * StiffnessAssembler2D(nodes, triangles, periodic_map)
+        
+        alpha = (8*self.mu) / (self.geometry_height ** 2)  # You may need to define geometry_height
+        M = MassAssembler2D(nodes, triangles, periodic_map)
+        A = StiffnessAssembler2D(nodes, triangles, periodic_map) 
+        A11 = self.mu * A + alpha * M
+        
         B1, B2 = DivergenceAssembler2D(nodes, triangles, pressure_nodes, periodic_map)
         b1, b2 = LoadAssembler2D(nodes, triangles, self.f, periodic_map)
 
-
-        B1T = (1 / self.rho) * B1.T
-        B2T = (1 / self.rho) * B2.T
+        B1T = B1.T
+        B2T = B2.T
 
         n = A11.shape[0]
         m = len(self.mesh.pressure_nodes)
@@ -81,26 +160,44 @@ class Simulation:
 
         self.rhs = np.concatenate([b1, b2, zero_b])
 
-        self.apply_boundary_conditions()
-        
-        slave_nodes = set(periodic_map.keys())
-        n = self.mesh.nodes.shape[0]
-        
-        
-        # Remove DOFs for the slave ndoes.
+        slave_nodes = set(self.mesh.periodic_map.keys())
         for node in slave_nodes:
-            for offset in [0, n]:  # Handle both u1 and u2 velocities
-                dof = node + offset
-                self.lhs[dof, :] = 0
-                self.lhs[:, dof] = 0 
-                self.lhs[dof, dof] = 1 
-                self.rhs[dof] = 0
-                
+            master = self.mesh.periodic_map[node]
+
+            # Velocity u1: Enforce u_slave - u_master = 0
+            slave_dof_u1 = node
+            master_dof_u1 = master
+            self.lhs[slave_dof_u1, :] = 0.0           # Zero out the slave row
+            self.lhs[slave_dof_u1, slave_dof_u1] = 1.0 # Set diagonal for slave DOF
+            self.lhs[slave_dof_u1, master_dof_u1] = -1.0# Set coupling to master DOF
+            self.rhs[slave_dof_u1] = 0.0              # Set RHS for this equation to 0
+
+            # Velocity u2: Enforce v_slave - v_master = 0
+            slave_dof_u2 = node + n
+            master_dof_u2 = master + n
+            self.lhs[slave_dof_u2, :] = 0.0           # Zero out the slave row
+            self.lhs[slave_dof_u2, slave_dof_u2] = 1.0 # Set diagonal for slave DOF
+            self.lhs[slave_dof_u2, master_dof_u2] = -1.0# Set coupling to master DOF
+            self.rhs[slave_dof_u2] = 0.0              # Set RHS for this equation to 0
+
+        # Apply other boundary conditions AFTER enforcing periodicity constraints
+        self.apply_boundary_conditions()    
+        
         self.lhs_scr = self.lhs.tocsr()
         
+        # Optional: Check for empty rows *after* all modifications
+        empty_rows = np.where(np.diff(self.lhs_scr.indptr) == 0)[0]
+        if len(empty_rows) > 0:
+            print(f"Warning: Found empty rows after BC application: {empty_rows}")        
         
     def solve(self):
-        sol = spla.spsolve(self.lhs_scr, self.rhs) 
+        sol = pypardiso.spsolve(self.lhs_scr, self.rhs) # Pypardiso should be faster than spsolve (approx 6%)
+        
+        residual = self.lhs_scr @ sol - self.rhs
+        self.res_norm = np.linalg.norm(residual)
+        rhs_norm = np.linalg.norm(self.rhs)
+        self.rel_res = self.res_norm / (rhs_norm + 1e-15)  # Avoid divide-by-zero
+
         n = self.mesh.nodes.shape[0]
     
         self.u1 = sol[:n]
@@ -130,7 +227,8 @@ class Simulation:
         self.solve()
         end_solver = datetime.now()
         print(f"\rSolved system in {(end_solver - total_start).total_seconds():.3f} seconds.")
-    
+        print(f"Solver residual norm: {self.res_norm:.3e} (relative: {self.rel_res:.3e})")
+
         print("Plotting results...", end="", flush=True)
         self.plot()
         end_plot = datetime.now()
@@ -151,8 +249,7 @@ class Simulation:
         """
         Modifies the system matrix (lhs) and RHS vector (rhs) to apply:
         - No-slip condition on walls (v = 0)
-        - Pressure at inlet
-        - Pressure at outlet
+        - Fix pressure at a single node along top edge.
         """
         n = self.mesh.nodes.shape[0]
         m = len(self.mesh.pressure_nodes)
@@ -165,31 +262,30 @@ class Simulation:
             for node in edge:
                 if node in periodic_slaves:
                     continue  # skip: handled by master node
-                # x-velocity
-                lhs[node, :] = 0
-                lhs[:, node] = 0
-                lhs[node, node] = 1
-                rhs[node] = 0
-    
-                # y-velocity
-                node_y = node + n
-                lhs[node_y, :] = 0
-                lhs[:, node_y] = 0
-                lhs[node_y, node_y] = 1
-                rhs[node_y] = 0
-    
+                # Apply u1 = 0 constraint (row modification only)
+                lhs[node, :] = 0.0        # Zero out row
+                #lhs[:, node] = 0.0       # DO NOT zero column
+                lhs[node, node] = 1.0     # Set diagonal to 1
+                rhs[node] = 0.0           # Set RHS to 0
 
-        # --- Fix pressure at one arbitrary node (to remove null space)
-        if len(mesh.pressure_nodes) > 0:
-            for node in mesh.pressure_nodes:
-                if node not in periodic_slaves:
-                    anchor_node = node
-                    break
-            anchor_dof = 2 * n + mesh.pressure_index_map[anchor_node]
-            lhs[anchor_dof, :] = 0
-            lhs[:, anchor_dof] = 0
-            lhs[anchor_dof, anchor_dof] = 1
-            rhs[anchor_dof] = 0
+                # Apply u2 = 0 constraint (row modification only)
+                node_y = node + n
+                lhs[node_y, :] = 0.0      # Zero out row
+                #lhs[:, node_y] = 0.0     # DO NOT zero column
+                lhs[node_y, node_y] = 1.0 # Set diagonal to 1
+                rhs[node_y] = 0.0         # Set RHS to 0
+    
+        # --- Fix pressure at one arbitrary node (using row modification) ---
+        anchor_node = max(mesh.pressure_nodes, key=lambda idx: mesh.nodes[idx][1]) # Node with highest y
+        # Find the index of this pressure node within the pressure block (0 to m-1)
+        pressure_dof_local = mesh.pressure_index_map[anchor_node]
+        # Calculate the global DOF index in the full system matrix (offset by 2*n)
+        anchor_dof_global = 2 * n + pressure_dof_local
+
+        lhs[anchor_dof_global, :] = 0.0               # Zero out row
+        #lhs[:, anchor_dof_global] = 0.0              # DO NOT zero column (safer)
+        lhs[anchor_dof_global, anchor_dof_global] = 1.0 # Set diagonal to 1
+        rhs[anchor_dof_global] = 0.0                  # Set RHS to 0
 
     def debug_system(self, tol=1e-12):
         """
@@ -231,6 +327,41 @@ class Simulation:
         total = np.prod(self.lhs_scr.shape)
         print(f"Matrix sparsity: {100*nnz/total:.2f}% nonzero entries.")
         print("--- End Debug Info ---\n")
+
+
+    def compute_permeability(self, direction='y'):
+        """
+        Computes permeability using a simplified method:
+        - Averages the velocity over each triangle
+        - Multiplies by triangle area to get total flow
+        - Uses pseudo-2D/3D scaling with 2/3 factor
+        """
+        u = self.u1 if direction == 'x' else self.u2
+        nodes = self.mesh.nodes
+        triangles = self.mesh.triangles[:, :3]  # Use P1 vertex nodes
+        total_flow = 0.0
+        total_area = 0.0
+    
+        for tri in triangles:
+            coords = nodes[tri, :2]
+            v0, v1, v2 = coords
+            area = 0.5 * abs((v1[0] - v0[0]) * (v2[1] - v0[1]) - (v1[1] - v0[1]) * (v2[0] - v0[0]))
+    
+            avg_u = np.mean(u[tri])  # Average over triangle vertices
+            total_flow += avg_u * area
+            total_area += area
+    
+        self.avg_velocity = total_flow / total_area
+        
+        print("Avg_velocity: ", float(f"{self.avg_velocity:.4e}"))
+
+        # Apply same pseudo-3D scaling
+        f_magnitude = abs(self.f(0, 0)[0 if direction == 'x' else 1])
+        k = (2 / 3) * (self.mu / self.rho / f_magnitude) * abs(self.avg_velocity)
+        
+        self.permeability = float(f"{k:.4e}")
+        print(f"Permeability: {self.permeability}.")
+        return
 
 
 def canonical_dof(node, periodic_map):
@@ -322,6 +453,7 @@ def localLoadVector2D(nodes, triangle, f):
         xi, eta = q[0], q[1]
         x, y = v0 + xi * (v1 - v0) + eta * (v2 - v0)
         fx, fy = f(x, y)
+
         for i in range(6):
             phi = P2Basis.basis(i, xi, eta)
             b1_local[i] += fx * phi * w * detJ / 2
@@ -403,6 +535,75 @@ def localStiffnessMatrix2D(nodes, triangle):
                 A_local[i, j] += w * (P2Basis.grad(i, xi, eta) @ G @ P2Basis.grad(j, xi, eta)) / 2
 
     return A_local
+
+def MassAssembler2D(nodes, triangles, periodic_map):
+    """
+    Assemble the global mass matrix M for a 2D FEM mesh using P2 elements.
+    
+    Parameters
+    ----------
+    nodes : ndarray of shape (n_nodes, 3)
+        Node coordinates.
+    triangles : ndarray of shape (n_triangles, 6)
+        Each row contains 6 node indices of a P2 triangle.
+
+    Returns
+    -------
+    M : scipy.sparse matrix of shape (n_nodes, n_nodes)
+        Global mass matrix.
+    """
+    n_nodes = nodes.shape[0]
+    M = sp.lil_matrix((n_nodes, n_nodes))
+
+    for triangle in triangles:
+        M_local = localMassMatrix2D(nodes, triangle)
+        for i in range(6):
+            for j in range(6):
+                i_global = canonical_dof(triangle[i], periodic_map)
+                j_global = canonical_dof(triangle[j], periodic_map)
+                M[i_global, j_global] += M_local[i, j]
+    return M
+
+def localMassMatrix2D(nodes, triangle):
+    """
+    Compute the local mass matrix for a P2 triangle using barycentric quadrature.
+
+    Parameters
+    ----------
+    nodes : ndarray of shape (n_nodes, 3)
+        Coordinates of mesh nodes.
+    triangle : array-like of shape (6,)
+        Indices of the 6 nodes forming the P2 triangle.
+
+    Returns
+    -------
+    M_local : ndarray of shape (6, 6)
+        Local mass matrix.
+    """
+    coords = nodes[triangle][:, :2]
+    v0, v1, v2 = coords[:3]
+
+    # Jacobian
+    J = np.column_stack((v1 - v0, v2 - v0))
+    detJ = abs(np.linalg.det(J))
+
+    # Barycentric quadrature
+    bary_coords = np.array([
+        [1/6, 1/6, 2/3],
+        [1/6, 2/3, 1/6],
+        [2/3, 1/6, 1/6]
+    ])
+    weights = np.array([1/3, 1/3, 1/3])
+
+    M_local = np.zeros((6, 6))
+
+    for q, w in zip(bary_coords, weights):
+        xi, eta = q[0], q[1]
+        phi = np.array([P2Basis.basis(i, xi, eta) for i in range(6)])
+        M_local += w * np.outer(phi, phi) * detJ / 2
+
+    return M_local
+
 
 def DivergenceAssembler2D(nodes, triangles, pressure_nodes, periodic_map):
     """
@@ -508,7 +709,7 @@ def plot_velocity_magnitude(mesh, u1, u2, title_suffix=""):
     t = mtri.Triangulation(mesh.nodes[:, 0] *1000, mesh.nodes[:, 1]*1000, triangles_P1) # Scaling from m to mm
     plt.tripcolor(t, magnitude, shading='flat', cmap='viridis', edgecolors='k', linewidth=0.1)
     
-    plt.title(f"Velocity Magnitude [m/s]\n{title_suffix}")
+    plt.title(f"Velocity Magnitude [m/s]\n{title_suffix}\n ", fontsize=10)
     plt.xlabel("x [mm]")
     plt.ylabel("y [mm]")
     plt.colorbar(label=r"$|u|$ [m/s]")
@@ -521,8 +722,8 @@ def plot_velocity_magnitude(mesh, u1, u2, title_suffix=""):
     plt.close()
     
     # --- NEW: Print some useful statistics ---
-    print(f"Max velocity magnitude: {np.max(magnitude):.4f} m/s")
-    print(f"Min velocity magnitude: {np.min(magnitude):.4f} m/s")
+    print(f"\rMax velocity magnitude: {np.max(magnitude):.3e} m/s")
+    print(f"Min velocity magnitude: {np.min(magnitude):.3e} m/s")
 
     return magnitude
     
@@ -538,7 +739,7 @@ def plot_pressure(mesh, pressure, title_suffix=""):
     t = mtri.Triangulation(vertex_coords[:, 0]*1000, vertex_coords[:, 1]*1000, triangles_p1) # Scaling from m to mm
     plt.tripcolor(t, pressure, shading='gouraud', cmap='coolwarm', edgecolors='k')
     
-    plt.title(f"Pressure Field (P1) [Pa]\n{title_suffix}")
+    plt.title(f"Pressure Field (P1) [Pa]\n{title_suffix}\n ", fontsize=10)
     plt.colorbar(label=r"$p$ [Pa]")
     plt.xlabel("x [mm]")
     plt.ylabel("y [mm]")
@@ -562,18 +763,27 @@ def plot_velocity_vectors(mesh, u1, u2, title_suffix=""):
     v = u2
 
     magnitude = np.sqrt(u**2 + v**2)
-    nonzero = magnitude > 1e-12  # Avoid division by zero
-    u_norm = np.zeros_like(u)
-    v_norm = np.zeros_like(v)
-    u_norm[nonzero] = u[nonzero] / magnitude[nonzero]
-    v_norm[nonzero] = v[nonzero] / magnitude[nonzero]
+    N = min(2500, len(u))  # Number of vectors to show
+    idx = np.random.choice(len(u), size=N, replace=False)
+
+    # Normalize vectors for uniform length
+    u_dir = np.zeros_like(u)
+    v_dir = np.zeros_like(v)
+    nonzero = magnitude > 1e-14
+    u_dir[nonzero] = u[nonzero] / magnitude[nonzero]
+    v_dir[nonzero] = v[nonzero] / magnitude[nonzero]
 
     plt.figure(figsize=(6, 5))
-    quiv = plt.quiver(x, y, u_norm, v_norm, magnitude, angles='xy',
-                      scale_units='xy', cmap='viridis', width=0.005)
+    quiv = plt.quiver(
+        x[idx], y[idx],
+        u_dir[idx], v_dir[idx],
+        magnitude[idx],            # Still color by original magnitude
+        angles='xy',     # scale controls arrow length
+        scale_units='xy', cmap='viridis'
+    )
 
     plt.colorbar(quiv, label='Velocity Magnitude [m/s]')
-    plt.title(f"Velocity Direction (colored by magnitude)\n{title_suffix}")
+    plt.title(f"Velocity Direction (colored by magnitude)\n{title_suffix}\n ", fontsize=10)
     plt.xlabel("x [mm]")
     plt.ylabel("y [mm]")
     plt.gca().set_aspect("equal")
@@ -583,7 +793,7 @@ def plot_velocity_vectors(mesh, u1, u2, title_suffix=""):
     plt.savefig(f"plots/velocity_vectors_colored_{safe_desc}.png", dpi=300)
     plt.show()
     plt.close()
-    return
+
     
 def load_simulation(filename):
     """
@@ -634,37 +844,36 @@ class P2Basis:
 
     
 if __name__ == "__main__":
-    # Create folders if it does nto exist
+    # Create folders if it does not exist
     os.makedirs("plots", exist_ok=True)
     os.makedirs("simulations", exist_ok=True)
     
     # Define constants
-    geometry_length = 0.01 # meters
-    mesh_size = geometry_length * 0.05 # meters
-    outlet_pressure = 0 #Pa
-    mu = 0.001 # Viscosity Pa*s
+    geometry_length = 0.001 # meters 0.001 is 1mm
+    mesh_size = geometry_length * 0.01 # meters
+    inner_radius = geometry_length * 0.35 
+    geometry_height = 0.000091 # 91 micrometer thickness
+    mu = 0.00089 # Viscosity Pa*s
     rho = 1000.0 # Density kg/m^3
     
     # Body forces
-    def f(x, y): return (0, -1)
-    
-    def velocity_inlet_profile(x, y):
-        height = geometry_length  # match geometry height (in meters)
-        u = 0.2 * 4 * (y / height) * (1 - y / height)  # max velocity at center
-        v = 0.0
-        return u, v
+    def f(x, y):
+        return (0, -1)      
 
     # Create mesh
-    create_mesh(geometry_length, mesh_size, "square_with_hole.msh")
+    create_mesh(geometry_length, mesh_size, inner_radius, "square_with_hole.msh")
     raw_mesh = meshio.read("square_with_hole.msh")
     mesh = load_mesh(raw_mesh)
     mesh.mesh_size = mesh_size  # manually attach it
+    print(f"Loaded mesh with length: {geometry_length} and radius: {inner_radius}, with {mesh.triangles.shape[0]} elements")
+    mesh.check_triangle_orientation()
 
     # Setup and run simulation
-    sim = Simulation(mesh, f, velocity_inlet_profile,
-                     mu=mu, rho=rho, outlet_pressure=outlet_pressure)
+    sim = Simulation(mesh, f, inner_radius, geometry_height, mu=mu, rho=rho)
     sim.run()
     
+    sim.compute_permeability(direction='y')
+
     # Save the entire Simulation object
     desc = sim.get_description()
     safe_desc = desc.replace(" ", "_").replace(",", "").replace("=", "").replace(".", "p")

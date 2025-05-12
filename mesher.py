@@ -9,39 +9,64 @@ import gmsh
 import meshio
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+import itertools
 
 from collections import defaultdict
 from datetime import datetime
+from scipy.spatial import cKDTree
+
 
 class Mesh:
     """
-    Container for a 2D triangular finite element mesh with boundary classification.
+    Container for a 2D triangular finite element mesh using P2 elements,
+    with classified boundaries and support for periodic mappings.
 
     Attributes
     ----------
     nodes : ndarray of shape (n_nodes, 3)
-        Coordinates of the mesh nodes.
+        Coordinates of the mesh nodes (x, y, z), where z is typically 0.
 
     triangles : ndarray of shape (n_elements, 6)
-        P2 element connectivity (6 node indices per triangle).
+        Connectivity for each P2 triangle using 6 node indices.
 
     interior_edges : list of tuple[int, int]
-        Edges shared by two elements (internal to the mesh).
+        Edges shared by two elements — interior to the domain.
 
-    boundary_edges : list of tuple[int, int]
-        Boundary edges excluding inlet and outlet.
+    interior_boundary_edges : list of tuple[int, int]
+        Edges on inner walls/boundaries (e.g., circle hole).
+
+    exterior_boundary_edges : list of tuple[int, int]
+        Edges on the outer rectangular boundary.
 
     inlet_edges : list of tuple[int, int]
-        Boundary edges on the left boundary (x ≈ 0.0).
+        Edges on the left boundary of the domain (inlet).
 
     outlet_edges : list of tuple[int, int]
-        Boundary edges on the right boundary (x ≈ 1.0).
+        Edges on the right boundary of the domain (outlet).
 
     pressure_nodes : ndarray of int
-        Indices of pressure DOFs (P1 vertex nodes).
+        Global node indices corresponding to pressure degrees of freedom (P1 vertex nodes).
 
     pressure_index_map : dict
-        Maps global node index to pressure DOF index.
+        Mapping from global node index to index in the pressure DOF vector.
+
+    periodic_map : dict[int, int]
+        Mapping of slave nodes to master nodes for enforcing periodicity.
+
+    Methods
+    -------
+    plot(show_node_ids=False, filename="mesh_plot.png")
+        Plots the mesh geometry, including edge types and optionally node IDs.
+        Saves the plot as a PNG image.
+
+    plot_periodic_pairs()
+        Visualizes periodic slave-master node pairs using color-coded markers.
+        Saves the plot as a PNG image.
+
+    check_triangle_orientation()
+        Checks if all triangles are oriented positively (non-inverted).
+        Reports number of inverted or zero-area triangles.
     """
 
     def __init__(self, nodes, triangles, interior_edges,pressure_nodes, pressure_index_map, 
@@ -124,8 +149,58 @@ class Mesh:
         print(f"\rPlotted mesh in {(end_plot - start_plot).total_seconds():.3f} seconds.")
         print(f"Mesh plot saved as {filename}.")
 
+    def plot_periodic_pairs(self):
+        """
+        Plots each periodic slave/master node pair with a unique color and marker.
+        """
+    
+        nodes = np.array(self.nodes)
+        periodic_map = self.periodic_map
+        filename = "periodic_pairs.png"
+    
+        plt.figure(figsize=(6, 6))
+    
+        # Set up color and marker cycles
+        colors = list(cm.get_cmap('tab20').colors)
+        markers = ['o', 's', 'D', '^', 'v', '<', '>', 'P', 'X', '*']
+        color_marker_cycle = itertools.cycle([(c, m) for c in colors for m in markers])
+    
+        # Loop through periodic pairs
+        for i, (slave, master) in enumerate(periodic_map.items()):
+            x_slave, y_slave = nodes[slave, 0] * 1000, nodes[slave, 1] * 1000
+            x_master, y_master = nodes[master, 0] * 1000, nodes[master, 1] * 1000
+    
+            color, marker = next(color_marker_cycle)
+    
+            plt.scatter(x_slave, y_slave, c=[color], marker=marker, s=30, label=f"Pair {i}" if i < 10 else "")
+            plt.scatter(x_master, y_master, c=[color], marker=marker, s=30)
+    
+        plt.gca().set_aspect("equal")
+        plt.xlabel("x [mm]")
+        plt.ylabel("y [mm]")
+        plt.title("Periodic Node Pairs")
+        if len(periodic_map) < 10:
+            plt.legend()
+        plt.tight_layout()
+        plt.savefig(filename, dpi=300)
+        plt.show()
+        
+        
+    def check_triangle_orientation(self):
+        bad = 0
+        for tri in self.triangles:
+            coords = self.nodes[tri[:3], :2]  # Only P1 nodes
+            v0, v1, v2 = coords
+            area = 0.5 * ((v1[0] - v0[0]) * (v2[1] - v0[1]) - (v2[0] - v0[0]) * (v1[1] - v0[1]))
+            if area <= 0:
+                bad += 1
+        if bad > 0:
+            print(f"{bad} triangle(s) have non-positive orientation (possibly inverted).")
+        else:
+            print("All triangles have consistent positive orientation.")
 
-def create_mesh(geometry_length=0.01, mesh_size=0.0001, output_file="square_with_hole.msh"):
+
+def create_mesh(geometry_length=0.01, mesh_size=0.0001, inner_radius=0.004, output_file="square_with_hole.msh"):
     """
     Generates a 2D unstructured P2 triangular mesh of a square domain with a circular hole.
 
@@ -190,7 +265,7 @@ def create_mesh(geometry_length=0.01, mesh_size=0.0001, output_file="square_with
     square_surface = gmsh.model.occ.addPlaneSurface([square_loop])
 
     # Circle hole
-    r = l/3
+    r = inner_radius
     center = gmsh.model.occ.addPoint(l/2, l/2, 0.0, mesh_size)
     c_p1 = gmsh.model.occ.addPoint(l/2 + r, l/2, 0.0, mesh_size)
     c_p2 = gmsh.model.occ.addPoint(l/2, l/2 + r, 0.0, mesh_size)
@@ -315,19 +390,10 @@ def load_mesh(mesh=None):
     pressure_nodes = np.unique(pressure_nodes)
     pressure_index_map = {node: i for i, node in enumerate(pressure_nodes)}
     
-    # --- Find periodic node pairs (top ↔ bottom) ---
-    tol = 1e-8
-    y_min = np.min(nodes[:, 1])
-    y_max = np.max(nodes[:, 1])
-
-    top_nodes = [i for i, p in enumerate(nodes) if np.isclose(p[1], y_max, atol=tol)]
-    bottom_nodes = [i for i, p in enumerate(nodes) if np.isclose(p[1], y_min, atol=tol)]
-
-    top_nodes_sorted = sorted(top_nodes, key=lambda i: nodes[i][0])
-    bottom_nodes_sorted = sorted(bottom_nodes, key=lambda i: nodes[i][0])
-
-    periodic_node_pairs = list(zip(bottom_nodes_sorted, top_nodes_sorted))
-    periodic_map = dict(periodic_node_pairs)
+    # Create periodic map, mapping masters and slaves
+    x_map = find_periodic_pairs(nodes, axis=0)
+    y_map = find_periodic_pairs(nodes, axis=1)
+    periodic_map = {**x_map, **y_map}
 
     # Initialize mesh class
     mesh = Mesh(
@@ -345,6 +411,36 @@ def load_mesh(mesh=None):
 
     return mesh
 
+
+def find_periodic_pairs(nodes, axis, tol=1e-10):
+    """
+    Finds periodic node pairs along a given axis (0 for x, 1 for y).
+    Matches all nodes on one boundary (slave) to their master counterparts
+    on the opposite side, based on orthogonal coordinate proximity.
+    """
+    coord_min = np.min(nodes[:, axis])
+    coord_max = np.max(nodes[:, axis])
+
+    master_nodes = np.where(np.isclose(nodes[:, axis], coord_min, atol=tol))[0]
+    slave_nodes = np.where(np.isclose(nodes[:, axis], coord_max, atol=tol))[0]
+
+    other_axis = 1 - axis
+    master_coords = nodes[master_nodes][:, other_axis][:, None]
+    slave_coords = nodes[slave_nodes][:, other_axis][:, None]
+
+    tree = cKDTree(master_coords)
+    dists, idxs = tree.query(slave_coords, distance_upper_bound=tol)
+
+    periodic_map = {}
+    for slave_idx, (master_idx, dist) in enumerate(zip(idxs, dists)):
+        if dist < tol:
+            slave = slave_nodes[slave_idx]
+            master = master_nodes[master_idx]
+            periodic_map[slave] = master
+
+    return periodic_map
+
+
 if __name__ == "__main__":
     """
     When run directly, this script will:
@@ -355,19 +451,20 @@ if __name__ == "__main__":
     """
     mesh_file = "square_with_hole.msh"
     geometry_length=0.1
+    inner_radius = 0.03
     mesh_size = 0.15 * geometry_length
     
     total_start = datetime.now()
 
     print("Creating mesh...", end="", flush=True)
-    create_mesh(geometry_length, mesh_size, output_file=mesh_file)
+    create_mesh(geometry_length, mesh_size, inner_radius, output_file=mesh_file)
 
     print("Loading mesh...", end="", flush=True)
     raw_mesh = meshio.read(mesh_file)
     mesh = load_mesh(raw_mesh)
 
     print("Plotting mesh...", end="", flush=True)
-    mesh.plot(show_node_ids=False, filename="mesh.png")
+    mesh.plot(show_node_ids=True, filename="mesh.png")
     
     end_mesh = datetime.now()
     print(f"\rMeshed in {(end_mesh - total_start).total_seconds():.3f} seconds")
