@@ -14,13 +14,16 @@ import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
 
 import scipy.sparse as sp
-import scipy.sparse.linalg as spla
 
 from mesher import create_mesh, load_mesh
 from datetime import datetime
 
 import pypardiso
 
+
+os.environ["OMP_NUM_THREADS"] = "12"
+os.environ["MKL_NUM_THREADS"] = "12"
+os.environ["NUMEXPR_NUM_THREADS"] = "12"
 
 class Simulation:
     """
@@ -170,31 +173,35 @@ class Simulation:
 
         self.rhs = np.concatenate([b1, b2, zero_b])
 
+        # Explicitly enforce LIL before modifications
+        self.lhs = self.lhs.tolil()
+        
         end_system = datetime.now()
         print(f"\rAssembled final system {(end_system - end_matrices).total_seconds():.3f} seconds.")
         
+        # Enforce periodicity (slave-master)
         print("Handling slaves...", end="", flush=True)
-
-        slave_nodes = set(self.mesh.periodic_map.keys())
-        for node in slave_nodes:
-            master = self.mesh.periodic_map[node]
-
-            # Velocity u1: Enforce u_slave - u_master = 0
-            slave_dof_u1 = node
-            master_dof_u1 = master
-            self.lhs[slave_dof_u1, :] = 0.0           # Zero out the slave row
-            self.lhs[slave_dof_u1, slave_dof_u1] = 1.0 # Set diagonal for slave DOF
-            self.lhs[slave_dof_u1, master_dof_u1] = -1.0# Set coupling to master DOF
-            self.rhs[slave_dof_u1] = 0.0              # Set RHS for this equation to 0
-
-            # Velocity u2: Enforce v_slave - v_master = 0
-            slave_dof_u2 = node + n
-            master_dof_u2 = master + n
-            self.lhs[slave_dof_u2, :] = 0.0           # Zero out the slave row
-            self.lhs[slave_dof_u2, slave_dof_u2] = 1.0 # Set diagonal for slave DOF
-            self.lhs[slave_dof_u2, master_dof_u2] = -1.0# Set coupling to master DOF
-            self.rhs[slave_dof_u2] = 0.0              # Set RHS for this equation to 0
-
+        self.slave_nodes = np.array(list(self.mesh.periodic_map.keys()))
+        self.master_nodes = np.array([self.mesh.periodic_map[node] for node in self.slave_nodes])
+        n = self.mesh.nodes.shape[0]
+        
+        # --- u1 (x-velocity) DOFs ---
+        slave_dof_u1 = self.slave_nodes
+        master_dof_u1 = self.master_nodes
+        
+        self.lhs[slave_dof_u1, :] = 0.0
+        self.lhs[slave_dof_u1, slave_dof_u1] = 1.0
+        self.lhs[slave_dof_u1, master_dof_u1] = -1.0
+        self.rhs[slave_dof_u1] = 0.0
+        
+        # --- u2 (y-velocity) DOFs ---
+        slave_dof_u2 = self.slave_nodes + n
+        master_dof_u2 = self.master_nodes + n
+        
+        self.lhs[slave_dof_u2, :] = 0.0
+        self.lhs[slave_dof_u2, slave_dof_u2] = 1.0
+        self.lhs[slave_dof_u2, master_dof_u2] = -1.0
+        self.rhs[slave_dof_u2] = 0.0
         
         end_slaves = datetime.now()
         print(f"\rFixed slaves {(end_slaves - end_system).total_seconds():.3f} seconds.")
@@ -204,6 +211,7 @@ class Simulation:
         # Apply other boundary conditions AFTER enforcing periodicity constraints
         self.apply_boundary_conditions()    
         
+        # Convert to scr for faster solve.
         self.lhs_scr = self.lhs.tocsr()
         
         # Optional: Check for empty rows *after* all modifications
@@ -216,7 +224,7 @@ class Simulation:
 
         
     def solve(self):
-        sol = pypardiso.spsolve(self.lhs_scr, self.rhs) # Pypardiso should be faster than spsolve (approx 6%)
+        sol = pypardiso.spsolve(self.lhs_scr, self.rhs)
         
         residual = self.lhs_scr @ sol - self.rhs
         self.res_norm = np.linalg.norm(residual)
@@ -233,9 +241,8 @@ class Simulation:
         self.p = sol[2*n:]
         
         # Copies the correct velocity from the master to the slave
-        for slave, master in self.mesh.periodic_map.items():
-            self.u1[slave] = self.u1[master]
-            self.u2[slave] = self.u2[master]
+        self.u1[self.slave_nodes] = self.u1[self.master_nodes]
+        self.u2[self.slave_nodes] = self.u2[self.master_nodes]
 
     def run(self):
         total_start = datetime.now()
@@ -253,7 +260,7 @@ class Simulation:
         print("Solving system...", end="", flush=True)
         self.solve()
         end_solver = datetime.now()
-        print(f"\rSolved system in {(end_solver - total_start).total_seconds():.3f} seconds.")
+        print(f"\rSolved system in {(end_solver - end_debug).total_seconds():.3f} seconds.")
         print(f"Solver residual norm: {self.res_norm:.3e} (relative: {self.rel_res:.3e})")
         
         if np.any(np.isnan(self.u1)) or np.any(np.isnan(self.u2)) or np.any(np.isnan(self.p)):
@@ -277,54 +284,48 @@ class Simulation:
         
     def apply_boundary_conditions(self):
         """
-        Modifies the system matrix (lhs) and RHS vector (rhs) to apply:
-        - No-slip condition on walls (v = 0)
-        - Fix pressure at a single node along top edge.
+        Vectorized version:
+        - No-slip condition on wall nodes (u1 = u2 = 0)
+        - Pressure anchoring at one pressure node
         """
         n = self.mesh.nodes.shape[0]
-        m = len(self.mesh.pressure_nodes)
-        lhs = self.lhs
+        lhs = self.lhs.tolil()  # Faster for row operations
         rhs = self.rhs
         periodic_slaves = set(self.mesh.periodic_map.keys())
-
-        # --- No-slip walls on interior boundary (velocity = 0)
-        for edge in mesh.interior_boundary_edges:
-            for node in edge:
-                if node in periodic_slaves:
-                    continue  # skip: handled by master node
-                # Apply u1 = 0 constraint (row modification only)
-                lhs[node, :] = 0.0        # Zero out row
-                #lhs[:, node] = 0.0       # DO NOT zero column
-                lhs[node, node] = 1.0     # Set diagonal to 1
-                rhs[node] = 0.0           # Set RHS to 0
-
-                # Apply u2 = 0 constraint (row modification only)
-                node_y = node + n
-                lhs[node_y, :] = 0.0      # Zero out row
-                #lhs[:, node_y] = 0.0     # DO NOT zero column
-                lhs[node_y, node_y] = 1.0 # Set diagonal to 1
-                rhs[node_y] = 0.0         # Set RHS to 0
     
-        # --- Fix pressure at one arbitrary node (using row modification) ---
-        # Choose the pressure node closest to y = 0.5 * domain height (and optionally also near x = 0.5)
+        # --- Collect all unique boundary nodes ---
+        boundary_nodes = np.unique(np.array(self.mesh.interior_boundary_edges).flatten())
+        
+        # Remove periodic slave nodes
+        boundary_nodes = np.array([node for node in boundary_nodes if node not in periodic_slaves])
+    
+        # Create velocity DOFs: u1 (x) and u2 (y)
+        boundary_dofs_u1 = boundary_nodes
+        boundary_dofs_u2 = boundary_nodes + n
+        all_boundary_dofs = np.concatenate([boundary_dofs_u1, boundary_dofs_u2])
+    
+        # Vectorized zeroing of rows and setting diagonal
+        lhs[all_boundary_dofs, :] = 0.0
+        lhs[all_boundary_dofs, all_boundary_dofs] = 1.0
+        rhs[all_boundary_dofs] = 0.0
+    
+        # --- Fix pressure at one arbitrary node ---
         target_y = 0.5 * np.max(self.mesh.nodes[:, 1])
         target_x = 0.1
         anchor_node = min(
             self.mesh.pressure_nodes,
             key=lambda idx: (self.mesh.nodes[idx][1] - target_y)**2 + (self.mesh.nodes[idx][0] - target_x)**2
         )
-        
+    
         print("\rAnchoring using node: ", anchor_node, ".    ")
-        
-        # Find the index of this pressure node within the pressure block (0 to m-1)
-        pressure_dof_local = mesh.pressure_index_map[anchor_node]
-        # Calculate the global DOF index in the full system matrix (offset by 2*n)
+    
+        pressure_dof_local = self.mesh.pressure_index_map[anchor_node]
         anchor_dof_global = 2 * n + pressure_dof_local
-
-        lhs[anchor_dof_global, :] = 0.0               # Zero out row
-        #lhs[:, anchor_dof_global] = 0.0              # DO NOT zero column (safer)
-        lhs[anchor_dof_global, anchor_dof_global] = 1.0 # Set diagonal to 1
-        rhs[anchor_dof_global] = 0.0                  # Set RHS to 0
+    
+        lhs[anchor_dof_global, :] = 0.0
+        lhs[anchor_dof_global, anchor_dof_global] = 1.0
+        rhs[anchor_dof_global] = 0.0
+    
 
     def debug_system(self, tol=1e-12):
         """
@@ -933,7 +934,9 @@ if __name__ == "__main__":
     sim = Simulation(mesh, f, geometry_length, inner_radius, geometry_height, mu=mu, rho=rho)
     sim.run()
     
+    start_calc = datetime.now()
     sim.calculate_permeability(direction='y')
+    print(f"Calculated permeability in {(datetime.now()-start_calc).total_seconds():.3f} seconds.")
 
     # Save the entire Simulation object
     desc = sim.get_description()

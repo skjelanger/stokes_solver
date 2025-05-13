@@ -316,8 +316,8 @@ def create_mesh(geometry_length=0.01, mesh_size=0.0001, inner_radius=0.004, outp
     -------
     None
     """
-
     gmsh.initialize()
+
     gmsh.model.add(output_file.rstrip(".msh"))
     
     l = geometry_length
@@ -377,31 +377,34 @@ def create_mesh(geometry_length=0.01, mesh_size=0.0001, inner_radius=0.004, outp
     circle_loop = gmsh.model.occ.addCurveLoop([arc1, arc2, arc3, arc4])
     circle_surface = gmsh.model.occ.addPlaneSurface([circle_loop])
     
-    # Distance-based size field
-    small = mesh_size * 0.4   # fine mesh near boundaries
-    large = mesh_size * 4.0   # coarser mesh far from walls
-    d_min = 0
-    d_max = 0.2 * geometry_length # Transition to coarse mesh over 2 mm
-    
-    # Add distance field near outer and inner boundaries
-    gmsh.model.mesh.field.add("Distance", 1)
-    wall_edges = [l1, l2, l3, l4, arc1, arc2, arc3, arc4]
-    gmsh.model.mesh.field.setNumbers(1, "EdgesList", wall_edges)
-    
-    # Use a threshold field to vary mesh size
-    gmsh.model.mesh.field.add("Threshold", 2)
-    gmsh.model.mesh.field.setNumber(2, "InField", 1)
-    gmsh.model.mesh.field.setNumber(2, "SizeMin", small)
-    gmsh.model.mesh.field.setNumber(2, "SizeMax", large)
-    gmsh.model.mesh.field.setNumber(2, "DistMin", d_min)
-    gmsh.model.mesh.field.setNumber(2, "DistMax", d_max)
-    
-    # Apply the field
-    gmsh.model.mesh.field.setAsBackgroundMesh(2)
 
     # Subtract circle from square
     [cut_surface], _ = gmsh.model.occ.cut([(2, square_surface)], [(2, circle_surface)])
+    gmsh.model.occ.synchronize()  # <--- Synchronize BEFORE mesh field setup
+    
+    # Define points near which we want finer mesh (e.g., near circle center)
+    p_left_circle = gmsh.model.occ.addPoint((geometry_length/2)-inner_radius, geometry_length/2, 0)
+    p_right_circle = gmsh.model.occ.addPoint((geometry_length/2)+inner_radius, geometry_length/2, 0)
+    p_left_wall = gmsh.model.occ.addPoint(geometry_length, geometry_length/2, 0)
+    p_right_wall = gmsh.model.occ.addPoint(0, geometry_length/2, 0)
+    
     gmsh.model.occ.synchronize()
+    
+    # --- Field 1: Distance from all fine-mesh areas (circle + walls) ---
+    gmsh.model.mesh.field.add("Distance", 1)
+    all_refine_pts = [p_left_circle, p_right_circle, p_left_wall, p_right_wall]
+    gmsh.model.mesh.field.setNumbers(1, "NodesList", all_refine_pts)
+    
+    # --- Field 2: Threshold size control based on distance ---
+    gmsh.model.mesh.field.add("Threshold", 2)
+    gmsh.model.mesh.field.setNumber(2, "InField", 1)
+    gmsh.model.mesh.field.setNumber(2, "SizeMin", 0.2 * mesh_size)   # very fine near features
+    gmsh.model.mesh.field.setNumber(2, "SizeMax", 2.0 * mesh_size)   # coarse elsewhere
+    gmsh.model.mesh.field.setNumber(2, "DistMin", (geometry_length*0.5 - inner_radius)/4)
+    gmsh.model.mesh.field.setNumber(2, "DistMax", geometry_length)  # ~3% of geometry size
+    
+    # Set background mesh size
+    gmsh.model.mesh.field.setAsBackgroundMesh(2)
     
     # Generate P2 mesh!
     gmsh.model.mesh.setOrder(2)  # Make sure this is BEFORE generate()
@@ -411,6 +414,7 @@ def create_mesh(geometry_length=0.01, mesh_size=0.0001, inner_radius=0.004, outp
     gmsh.model.mesh.generate(2)
 
     gmsh.write(output_file)
+    gmsh.clear()
     gmsh.finalize()
 
     return
@@ -568,7 +572,7 @@ if __name__ == "__main__":
     """
     mesh_file = "square_with_hole.msh"
     geometry_length=0.1
-    inner_radius = geometry_length * 0.35
+    inner_radius = geometry_length * 0.2
     mesh_size = 0.05 * geometry_length
     
     total_start = datetime.now()
