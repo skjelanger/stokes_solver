@@ -25,7 +25,7 @@ os.makedirs("logs", exist_ok=True)
 # Constants
 geometry_length = 0.001
 inner_radii = geometry_length * np.array([0.35, 0.40, 0.45, 0.47, 0.49])
-mesh_size = geometry_length * np.array([0.05, 0.05, 0.05, 0.05, 0.05])
+mesh_size = geometry_length * np.array([0.0024, 0.0018, 0.0014, 0.0012, 0.0010])
 geometry_height = 0.000091 # 91 micrometer thickness
 mu = 0.00089
 rho = 1000.0
@@ -57,13 +57,13 @@ for idx, inner_radius in enumerate(inner_radii, 1):
     print(f"\n\n=== Simulation {idx} of {len(inner_radii)}: inner_radius = {inner_radius:.5f} ===")
     try:
         mesh_start = datetime.now()
-        create_mesh(geometry_length, mesh_size, inner_radius, "square_with_hole.msh")
+        create_mesh(geometry_length, mesh_size[idx - 1], inner_radius, "square_with_hole.msh")
         mesh_time = datetime.now()
         print(f"Created mesh in {(mesh_time - mesh_start).total_seconds():.3f} seconds.")
         
         raw_mesh = meshio.read("square_with_hole.msh")
         mesh = load_mesh(raw_mesh)
-        mesh.mesh_size = mesh_size
+        mesh.mesh_size = mesh_size[idx - 1]
         load_time = datetime.now()
         print(f"Loaded mesh with {mesh.triangles.shape[0]} elements in {(load_time - mesh_time).total_seconds():.3f} seconds.")
         
