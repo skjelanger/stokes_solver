@@ -136,6 +136,8 @@ class Simulation:
         pressure_nodes = self.mesh.pressure_nodes
         periodic_map = self.mesh.periodic_map
         
+        print("\rAssembling matrices...", end="", flush=True)
+        start_matrices = datetime.now()
         alpha = (8*self.mu) / (self.geometry_height ** 2)  # You may need to define geometry_height
         M = MassAssembler2D(nodes, triangles, periodic_map)
         A = StiffnessAssembler2D(nodes, triangles, periodic_map) 
@@ -143,6 +145,12 @@ class Simulation:
         
         B1, B2 = DivergenceAssembler2D(nodes, triangles, pressure_nodes, periodic_map)
         b1, b2 = LoadAssembler2D(nodes, triangles, self.f, periodic_map)
+        
+        end_matrices = datetime.now()
+        print(f"\rAssembled matrices in {(end_matrices - start_matrices).total_seconds():.3f} seconds.")
+        
+        
+        print("Assembling full system...", end="", flush=True)
 
         B1T = B1.T
         B2T = B2.T
@@ -161,6 +169,11 @@ class Simulation:
         ], format='lil')
 
         self.rhs = np.concatenate([b1, b2, zero_b])
+
+        end_system = datetime.now()
+        print(f"\rAssembled final system {(end_system - end_matrices).total_seconds():.3f} seconds.")
+        
+        print("Handling slaves...", end="", flush=True)
 
         slave_nodes = set(self.mesh.periodic_map.keys())
         for node in slave_nodes:
@@ -182,6 +195,12 @@ class Simulation:
             self.lhs[slave_dof_u2, master_dof_u2] = -1.0# Set coupling to master DOF
             self.rhs[slave_dof_u2] = 0.0              # Set RHS for this equation to 0
 
+        
+        end_slaves = datetime.now()
+        print(f"\rFixed slaves {(end_slaves - end_system).total_seconds():.3f} seconds.")
+        
+        print("Handling BC's and cleaning up...", end="", flush=True)
+
         # Apply other boundary conditions AFTER enforcing periodicity constraints
         self.apply_boundary_conditions()    
         
@@ -191,6 +210,10 @@ class Simulation:
         empty_rows = np.where(np.diff(self.lhs_scr.indptr) == 0)[0]
         if len(empty_rows) > 0:
             warnings.warn(f"Empty rows in system matrix after boundary condition application: {empty_rows}")
+            
+        end_BCs = datetime.now()
+        print(f"\rHandled BCs in {(end_BCs - end_slaves).total_seconds():.3f} seconds.")
+
         
     def solve(self):
         sol = pypardiso.spsolve(self.lhs_scr, self.rhs) # Pypardiso should be faster than spsolve (approx 6%)
@@ -291,7 +314,7 @@ class Simulation:
             key=lambda idx: (self.mesh.nodes[idx][1] - target_y)**2 + (self.mesh.nodes[idx][0] - target_x)**2
         )
         
-        print("\rAnchoring using node: ", anchor_node)
+        print("\rAnchoring using node: ", anchor_node, ".    ")
         
         # Find the index of this pressure node within the pressure block (0 to m-1)
         pressure_dof_local = mesh.pressure_index_map[anchor_node]
@@ -316,7 +339,7 @@ class Simulation:
         tol : float
             Tolerance for rank deficiency detection.
         """
-        print("\n--- System Debug Info ---")
+        print("\r--- System Debug Info ---")
         print(f"LHS shape: {self.lhs_scr.shape}")
         print(f"RHS shape: {self.rhs.shape}")
         
@@ -334,15 +357,15 @@ class Simulation:
             AtA = self.lhs_scr @ self.lhs_scr.T
             diag = AtA.diagonal()
             numerical_rank = np.sum(np.abs(diag) > tol)
-            print(f"Numerical rank estimate: {numerical_rank} / {self.lhs_scr.shape[0]}")
+            print(f"\rNumerical rank estimate: {numerical_rank} / {self.lhs_scr.shape[0]}")
         except Exception as e:
-            print(f"Rank check failed: {e}")
+            print(f"\rRank check failed: {e}")
         
         # Print matrix density
         nnz = self.lhs_scr.nnz
         total = np.prod(self.lhs_scr.shape)
-        print(f"Matrix sparsity: {100*nnz/total:.2f}% nonzero entries.")
-        print("--- End Debug Info ---\n")
+        print(f"Matrix sparsity: {100*nnz/total:.2e}% nonzero entries.")
+        print("--- End Debug Info ---")
 
 
     def calculate_permeability(self, direction='y'):
@@ -726,10 +749,14 @@ def localDivergenceMatrix2D(nodes, triangle):
 
 def plot_velocity_magnitude(mesh, u1, u2, title_suffix=""):
     magnitude = np.sqrt(u1**2 + u2**2)
-    plt.figure(figsize=(6, 5))
+    plt.figure(figsize=(6, 5), dpi=300)
     triangles_P1 = mesh.triangles[:, :3]
+    if mesh.triangles.shape[0] > 10000:
+        edgecolor = 'none'
+    else:
+        edgecolor = 'k'
     t = mtri.Triangulation(mesh.nodes[:, 0] *1000, mesh.nodes[:, 1]*1000, triangles_P1) # Scaling from m to mm
-    plt.tripcolor(t, magnitude, shading='flat', cmap='viridis', edgecolors='k', linewidth=0.1)
+    plt.tripcolor(t, magnitude, shading='flat', cmap='viridis', edgecolors=edgecolor, linewidth=0.1)
     
     plt.title(f"Velocity Magnitude [m/s]\n{title_suffix}\n ", fontsize=10)
     plt.xlabel("x [mm]")
@@ -750,7 +777,7 @@ def plot_velocity_magnitude(mesh, u1, u2, title_suffix=""):
     return magnitude
     
 def plot_pressure(mesh, pressure, title_suffix=""):
-    plt.figure(figsize=(6, 5))
+    plt.figure(figsize=(6, 5), dpi=300)
     vertex_coords = mesh.nodes[mesh.pressure_nodes] 
     old_to_new = {old: new for new, old in enumerate(mesh.pressure_nodes)}
     triangles_p1 = np.array([
@@ -758,8 +785,12 @@ def plot_pressure(mesh, pressure, title_suffix=""):
         for tri in mesh.triangles
         if all(i in old_to_new for i in tri[:3])
     ])
+    if mesh.triangles.shape[0] > 10000:
+        edgecolor = 'none'
+    else:
+        edgecolor = 'k'
     t = mtri.Triangulation(vertex_coords[:, 0]*1000, vertex_coords[:, 1]*1000, triangles_p1) # Scaling from m to mm
-    plt.tripcolor(t, pressure, shading='gouraud', cmap='coolwarm', edgecolors='k')
+    plt.tripcolor(t, pressure, shading='gouraud', cmap='coolwarm', edgecolors=edgecolor)
     
     plt.title(f"Pressure Field (P1) [Pa]\n{title_suffix}\n ", fontsize=10)
     plt.colorbar(label=r"$p$ [Pa]")
@@ -795,7 +826,7 @@ def plot_velocity_vectors(mesh, u1, u2, title_suffix=""):
     u_dir[nonzero] = u[nonzero] / magnitude[nonzero]
     v_dir[nonzero] = v[nonzero] / magnitude[nonzero]
 
-    plt.figure(figsize=(6, 5))
+    plt.figure(figsize=(6, 5), dpi=300)
     quiv = plt.quiver(
         x[idx], y[idx],
         u_dir[idx], v_dir[idx],
@@ -863,7 +894,7 @@ class P2Basis:
             [(-4*eta), (4 - 4*xi - 8*eta)]
         ]
         return np.array(grads[i])
-
+    
     
 if __name__ == "__main__":
     # Create folders if it does not exist
@@ -872,8 +903,8 @@ if __name__ == "__main__":
     
     # Define constants
     geometry_length = 0.001 # meters 0.001 is 1mm
-    mesh_size = geometry_length * 0.002 # meters
-    inner_radius = geometry_length * 0.49
+    mesh_size = geometry_length * 0.008 # meters
+    inner_radius = geometry_length * 0.35
     geometry_height = 0.000091 # 91 micrometer thickness
     mu = 0.00089 # Viscosity Pa*s
     rho = 1000.0 # Density kg/m^3
@@ -883,12 +914,20 @@ if __name__ == "__main__":
         return (0, -1)      
 
     # Create mesh
+    mesh_start = datetime.now()
     create_mesh(geometry_length, mesh_size, inner_radius, "square_with_hole.msh")
+    mesh_time = datetime.now()
+    print(f"Created mesh in in {(mesh_time - mesh_start).total_seconds():.3f} seconds.")
+
     raw_mesh = meshio.read("square_with_hole.msh")
     mesh = load_mesh(raw_mesh)
     mesh.mesh_size = mesh_size  # manually attach it
-    print(f"Loaded mesh with length: {geometry_length} and radius: {inner_radius}, with {mesh.triangles.shape[0]} elements")
-    mesh.check_triangle_orientation()
+    load_time = datetime.now()
+    print(f"Loaded mesh with length: {geometry_length} and radius: {inner_radius}, with {mesh.triangles.shape[0]} elements in {(load_time - mesh_time).total_seconds():.3f} seconds.")
+
+    mesh.check_mesh_quality()
+    check_time = datetime.now()
+    print(f"Checked mesh in {(check_time - load_time).total_seconds():.3f} seconds.")
 
     # Setup and run simulation
     sim = Simulation(mesh, f, geometry_length, inner_radius, geometry_height, mu=mu, rho=rho)

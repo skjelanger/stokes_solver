@@ -5,6 +5,7 @@ Created on Fri Apr 25 11:23:45 2025
 @author: skje
 """
 
+import warnings
 import gmsh 
 import meshio
 import numpy as np
@@ -198,6 +199,102 @@ class Mesh:
             print(f"{bad} triangle(s) have non-positive orientation (possibly inverted).")
         else:
             print("All triangles have consistent positive orientation.")
+            
+    def check_mesh_quality(self, show_histograms=True):
+        """
+        Compute and display quality metrics for mesh triangles:
+        - aspect ratio
+        - minimum angle
+        - area
+    
+        Parameters
+        ----------
+        show_histograms : bool
+            Whether to plot histograms of the computed metrics.
+    
+        Returns
+        -------
+        dict
+            Summary statistics for quality metrics.
+        """
+            
+        def triangle_angles(a, b, c):
+            """Returns angles (in degrees) of triangle with sides a, b, c using the Law of Cosines."""
+            cos_A = (b**2 + c**2 - a**2) / (2 * b * c)
+            cos_B = (a**2 + c**2 - b**2) / (2 * a * c)
+            cos_C = (a**2 + b**2 - c**2) / (2 * a * b)
+            angles = np.degrees(np.arccos(np.clip([cos_A, cos_B, cos_C], -1.0, 1.0)))
+            return angles
+    
+        min_angles = []
+        aspect_ratios = []
+        areas = []
+    
+        for tri in self.triangles:
+            pts = self.nodes[tri[:3], :2]
+            a = np.linalg.norm(pts[1] - pts[0])
+            b = np.linalg.norm(pts[2] - pts[1])
+            c = np.linalg.norm(pts[0] - pts[2])
+    
+            s = 0.5 * (a + b + c)
+            area = max(s * (s - a) * (s - b) * (s - c), 0.0) ** 0.5
+    
+            angles = triangle_angles(a, b, c)
+            min_angles.append(np.min(angles))
+            aspect_ratios.append(max(a, b, c) / min(a, b, c))
+            areas.append(area)
+    
+        min_angles = np.array(min_angles)
+        aspect_ratios = np.array(aspect_ratios)
+        areas = np.array(areas)
+    
+        print("\r--- Mesh Debug Info ---")
+        self.check_triangle_orientation()
+
+        print(f"Minimum angle: {min_angles.min():.2f}°")
+        print(f"Maximum aspect ratio: {aspect_ratios.max():.2f}")
+        print(f"Area range: [{areas.min():.2e}, {areas.max():.2e}]")
+    
+        # --- Warnings ---
+        if min_angles.min() < 20.0:
+            warnings.warn(f"Minimum angle is very small ({min_angles.min():.2f}°). This may lead to numerical instability.")
+        if aspect_ratios.max() > 5.0:
+            warnings.warn(f"Maximum aspect ratio is high ({aspect_ratios.max():.2f}). Consider refining mesh.")
+        if areas.min() / areas.max() < 0.01:
+            warnings.warn("Element size variation is large. Check if size field is behaving as intended.")
+        print("--- End mesh Info ---")
+
+    
+        if show_histograms:
+            plt.figure(figsize=(12, 3))
+            plt.subplot(1, 3, 1)
+            plt.hist(min_angles, bins=30, color='C0')
+            plt.title("Min Angle [°]")
+            plt.xlabel("Angle")
+            plt.grid(True)
+    
+            plt.subplot(1, 3, 2)
+            plt.hist(aspect_ratios, bins=30, color='C1')
+            plt.title("Aspect Ratio")
+            plt.xlabel("Ratio")
+            plt.grid(True)
+    
+            plt.subplot(1, 3, 3)
+            plt.hist(areas, bins=30, color='C2')
+            plt.title("Triangle Area")
+            plt.xlabel("Area")
+            plt.grid(True)
+    
+            plt.tight_layout()
+            plt.savefig("mesh_quality_histograms.png", dpi=300)
+            plt.show()
+    
+        return {
+            "min_angle_deg": min_angles.min(),
+            "max_aspect_ratio": aspect_ratios.max(),
+            "area_range": (areas.min(), areas.max())
+        }
+
 
 
 def create_mesh(geometry_length=0.01, mesh_size=0.0001, inner_radius=0.004, output_file="square_with_hole.msh"):
@@ -279,17 +376,38 @@ def create_mesh(geometry_length=0.01, mesh_size=0.0001, inner_radius=0.004, outp
 
     circle_loop = gmsh.model.occ.addCurveLoop([arc1, arc2, arc3, arc4])
     circle_surface = gmsh.model.occ.addPlaneSurface([circle_loop])
+    
+    # Distance-based size field
+    small = mesh_size * 0.4   # fine mesh near boundaries
+    large = mesh_size * 4.0   # coarser mesh far from walls
+    d_min = 0
+    d_max = 0.2 * geometry_length # Transition to coarse mesh over 2 mm
+    
+    # Add distance field near outer and inner boundaries
+    gmsh.model.mesh.field.add("Distance", 1)
+    wall_edges = [l1, l2, l3, l4, arc1, arc2, arc3, arc4]
+    gmsh.model.mesh.field.setNumbers(1, "EdgesList", wall_edges)
+    
+    # Use a threshold field to vary mesh size
+    gmsh.model.mesh.field.add("Threshold", 2)
+    gmsh.model.mesh.field.setNumber(2, "InField", 1)
+    gmsh.model.mesh.field.setNumber(2, "SizeMin", small)
+    gmsh.model.mesh.field.setNumber(2, "SizeMax", large)
+    gmsh.model.mesh.field.setNumber(2, "DistMin", d_min)
+    gmsh.model.mesh.field.setNumber(2, "DistMax", d_max)
+    
+    # Apply the field
+    gmsh.model.mesh.field.setAsBackgroundMesh(2)
 
     # Subtract circle from square
     [cut_surface], _ = gmsh.model.occ.cut([(2, square_surface)], [(2, circle_surface)])
-
     gmsh.model.occ.synchronize()
     
     # Generate P2 mesh!
     gmsh.model.mesh.setOrder(2)  # Make sure this is BEFORE generate()
     gmsh.option.setNumber("Mesh.ElementOrder", 2)  # optional, reinforces the intent
     gmsh.option.setNumber("Mesh.SecondOrderIncomplete", 0)  # use complete P2 elements
-        
+
     gmsh.model.mesh.generate(2)
 
     gmsh.write(output_file)
@@ -323,7 +441,7 @@ def load_mesh(mesh=None):
         triangles = mesh.cells_dict["triangle6"]
     elif "triangle" in mesh.cells_dict:
         triangles = mesh.cells_dict["triangle"]
-        print("Warning: using linear triangles (P1), not P2")
+        warnings.warn("Using linear triangles (P1), not P2. Higher-order accuracy may be reduced.")
     else:
         raise ValueError("No triangle or triangle6 elements found in mesh.")
 
@@ -440,7 +558,6 @@ def find_periodic_pairs(nodes, axis, tol=1e-10):
 
     return periodic_map
 
-
 if __name__ == "__main__":
     """
     When run directly, this script will:
@@ -451,8 +568,8 @@ if __name__ == "__main__":
     """
     mesh_file = "square_with_hole.msh"
     geometry_length=0.1
-    inner_radius = 0.03
-    mesh_size = 0.15 * geometry_length
+    inner_radius = geometry_length * 0.35
+    mesh_size = 0.05 * geometry_length
     
     total_start = datetime.now()
 
@@ -462,9 +579,12 @@ if __name__ == "__main__":
     print("Loading mesh...", end="", flush=True)
     raw_mesh = meshio.read(mesh_file)
     mesh = load_mesh(raw_mesh)
+    
+    print("Checking mesh quality...", end="", flush=True)
+    mesh.check_mesh_quality()
 
     print("Plotting mesh...", end="", flush=True)
-    mesh.plot(show_node_ids=True, filename="mesh.png")
+    mesh.plot(show_node_ids=False, filename="mesh.png")
     
     end_mesh = datetime.now()
     print(f"\rMeshed in {(end_mesh - total_start).total_seconds():.3f} seconds")
