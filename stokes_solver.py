@@ -5,6 +5,7 @@ Created on Fri Apr  4 07:15:06 2025
 @author: skje
 """
 
+import warnings
 import pickle
 import os
 import meshio
@@ -84,7 +85,7 @@ class Simulation:
    debug_system(tol=1e-12)
        Checks symmetry, sparsity, and approximate rank of the assembled system.
 
-   compute_permeability(direction='y') -> float
+   calculate_permeability(direction='y') -> float
        Estimates average permeability using average velocity and known body force.
    """
    
@@ -189,7 +190,7 @@ class Simulation:
         # Optional: Check for empty rows *after* all modifications
         empty_rows = np.where(np.diff(self.lhs_scr.indptr) == 0)[0]
         if len(empty_rows) > 0:
-            print(f"Warning: Found empty rows after BC application: {empty_rows}")        
+            warnings.warn(f"Empty rows in system matrix after boundary condition application: {empty_rows}")
         
     def solve(self):
         sol = pypardiso.spsolve(self.lhs_scr, self.rhs) # Pypardiso should be faster than spsolve (approx 6%)
@@ -198,13 +199,15 @@ class Simulation:
         self.res_norm = np.linalg.norm(residual)
         rhs_norm = np.linalg.norm(self.rhs)
         self.rel_res = self.res_norm / (rhs_norm + 1e-15)  # Avoid divide-by-zero
+        
+        if rhs_norm < 1e-12:
+            warnings.warn("RHS vector has very small norm; system may be underconstrained or incorrectly assembled.")
 
         n = self.mesh.nodes.shape[0]
     
         self.u1 = sol[:n]
         self.u2 = sol[n:2*n]
         self.p = sol[2*n:]
-        
         
         # Copies the correct velocity from the master to the slave
         for slave, master in self.mesh.periodic_map.items():
@@ -229,6 +232,9 @@ class Simulation:
         end_solver = datetime.now()
         print(f"\rSolved system in {(end_solver - total_start).total_seconds():.3f} seconds.")
         print(f"Solver residual norm: {self.res_norm:.3e} (relative: {self.rel_res:.3e})")
+        
+        if np.any(np.isnan(self.u1)) or np.any(np.isnan(self.u2)) or np.any(np.isnan(self.p)):
+            warnings.warn("Solution contains NaN values! Check boundary conditions and matrix assembly.")
 
         print("Plotting results...", end="", flush=True)
         self.plot()
@@ -339,42 +345,45 @@ class Simulation:
         print("--- End Debug Info ---\n")
 
 
-    def compute_permeability(self, direction='y'):
+    def calculate_permeability(self, direction='y'):
         """
-        Computes permeability using Darcy's law with a pressure gradient estimated 
-        from average pressure at top and bottom boundaries, including 2/3 scaling.
+        Calculates permeability using Darcy's law and properly averages velocity
+        over P2 elements (including mid-edge nodes).
         """
         if direction != 'y':
             raise NotImplementedError("Only vertical permeability (y-direction) is currently supported.")
     
         u = self.u2  # vertical velocity component
         nodes = self.mesh.nodes
-        triangles = self.mesh.triangles[:, :3]  # Use P1 vertex nodes
+        triangles = self.mesh.triangles  # P2 triangles: shape (n_elements, 6)
     
-        # --- Compute average vertical velocity over the domain ---
         total_flow = 0.0
         total_area = 0.0
+    
         for tri in triangles:
-            coords = nodes[tri, :2]
-            v0, v1, v2 = coords
+            vertex_coords = nodes[tri[:3], :2]  # Use first 3 nodes to get triangle geometry (area)
+            v0, v1, v2 = vertex_coords
             area = 0.5 * abs((v1[0] - v0[0]) * (v2[1] - v0[1]) - (v1[1] - v0[1]) * (v2[0] - v0[0]))
-            avg_u = np.mean(u[tri])  # Average over triangle vertices
+    
+            avg_u = np.mean(u[tri])  # <-- Average over all 6 P2 nodes now
             total_flow += avg_u * area
             total_area += area
+    
         avg_v = total_flow / total_area
     
         f_magnitude = abs(self.f(0, 0)[0 if direction == 'x' else 1])
     
-        # --- Apply Darcy-based permeability formula ---
+        # Apply Darcy's Law with 2/3 parabolic scaling
         k = (2 / 3) * self.mu * abs(avg_v) / f_magnitude
-    
-        # --- Store and print results ---
+
+        # Store and print
         self.avg_velocity = float(f"{avg_v:.4e}")
         self.permeability = float(f"{k:.4e}")
     
         print(f"Avg velocity:     {self.avg_velocity} m/s")
         print(f"Permeability:     {self.permeability} m²")
         return
+
 
 
 def canonical_dof(node, periodic_map):
@@ -386,7 +395,7 @@ def LoadAssembler2D(nodes, triangles, f, periodic_map):
     """
     Assembles the global load vector for a 2D finite element problem using P2 elements.
 
-    This function loops over all elements in the mesh and computes the local load vector
+    This function loops over all elements in the mesh and Calculates the local load vector
     using a given source function, then assembles it into the global vector.
 
     Parameters
@@ -421,7 +430,7 @@ def LoadAssembler2D(nodes, triangles, f, periodic_map):
 
 def localLoadVector2D(nodes, triangle, f):
     """
-    Computes the local load vector for a single P2 triangle using 3-point 
+    Calculates the local load vector for a single P2 triangle using 3-point 
     barycentric quadrature.
 
     The function evaluates the integral of f(x, y) * φ_i(x, y) over the triangle using 
@@ -664,7 +673,7 @@ def DivergenceAssembler2D(nodes, triangles, pressure_nodes, periodic_map):
 
 def localDivergenceMatrix2D(nodes, triangle):
     """
-      Computes the local divergence matrices for a single P2 triangle element.
+      Calculates the local divergence matrices for a single P2 triangle element.
     
       Returns the contribution of this element to the global divergence operators 
       B1 and B2 using 3-point barycentric quadrature.
@@ -713,7 +722,7 @@ def localDivergenceMatrix2D(nodes, triangle):
                 B1_local[i, j] += w * grad_xy[0] * detJ / 2
                 B2_local[i, j] += w * grad_xy[1] * detJ / 2
 
-    return -B1_local, -B2_local
+    return -B1_local, -B2_local # Minus sign from defintion of our divergence matrix
 
 def plot_velocity_magnitude(mesh, u1, u2, title_suffix=""):
     magnitude = np.sqrt(u1**2 + u2**2)
@@ -863,7 +872,7 @@ if __name__ == "__main__":
     
     # Define constants
     geometry_length = 0.001 # meters 0.001 is 1mm
-    mesh_size = geometry_length * 0.005# meters
+    mesh_size = geometry_length * 0.002 # meters
     inner_radius = geometry_length * 0.49
     geometry_height = 0.000091 # 91 micrometer thickness
     mu = 0.00089 # Viscosity Pa*s
@@ -885,7 +894,7 @@ if __name__ == "__main__":
     sim = Simulation(mesh, f, geometry_length, inner_radius, geometry_height, mu=mu, rho=rho)
     sim.run()
     
-    sim.compute_permeability(direction='y')
+    sim.calculate_permeability(direction='y')
 
     # Save the entire Simulation object
     desc = sim.get_description()
