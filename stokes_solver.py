@@ -563,6 +563,7 @@ def localStiffnessMatrix2D(nodes, triangle):
     bary_coords = np.array([
         [1/6, 1/6, 2/3],
         [1/6, 2/3, 1/6],
+        
         [2/3, 1/6, 1/6]
     ])
     weights = np.array([1/3, 1/3, 1/3])
@@ -944,7 +945,7 @@ if __name__ == "__main__":
     
     # Define constants
     geometry_length = 0.001 # meters 0.001 is 1mm
-    mesh_size = geometry_length * 0.01 # meters
+    mesh_size = geometry_length * 0.002 # meters
     inner_radius = geometry_length * 0.35
     geometry_height = 0.000091 # 91 micrometer thickness
     mu = 0.00089 # Viscosity Pa*s
