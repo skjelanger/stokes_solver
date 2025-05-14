@@ -19,6 +19,7 @@ from mesher import create_mesh, load_mesh
 from datetime import datetime
 
 import pypardiso
+from numba import njit
 
 
 class Simulation:
@@ -537,6 +538,7 @@ def StiffnessAssembler2D(nodes, triangles, periodic_map):
                 A[i_global, j_global] += A_local[i, j]
     return A
 
+@njit
 def localStiffnessMatrix2D(nodes, triangle):
     """
     Compute local stiffness matrix for a P2 (quadratic) triangle using 3-point 
@@ -578,7 +580,7 @@ def localStiffnessMatrix2D(nodes, triangle):
         xi, eta = q[0], q[1]
         for i in range(6):
             for j in range(6):
-                A_local[i, j] += w * (P2Basis.grad(i, xi, eta) @ G @ P2Basis.grad(j, xi, eta)) / 2
+                A_local[i, j] += w * (P2_grad(i, xi, eta) @ G @ P2_grad(j, xi, eta)) / 2
 
     return A_local
 
@@ -610,6 +612,8 @@ def MassAssembler2D(nodes, triangles, periodic_map):
                 M[i_global, j_global] += M_local[i, j]
     return M
 
+
+@njit
 def localMassMatrix2D(nodes, triangle):
     """
     Compute the local mass matrix for a P2 triangle using barycentric quadrature.
@@ -645,7 +649,7 @@ def localMassMatrix2D(nodes, triangle):
 
     for q, w in zip(bary_coords, weights):
         xi, eta = q[0], q[1]
-        phi = np.array([P2Basis.basis(i, xi, eta) for i in range(6)])
+        phi = np.array([P2_basis(i, xi, eta) for i in range(6)])
         M_local += w * np.outer(phi, phi) * detJ / 2
 
     return M_local
@@ -695,6 +699,7 @@ def DivergenceAssembler2D(nodes, triangles, pressure_nodes, periodic_map):
 
     return B1, B2
 
+@njit
 def localDivergenceMatrix2D(nodes, triangle):
     """
       Calculates the local divergence matrices for a single P2 triangle element.
@@ -741,7 +746,7 @@ def localDivergenceMatrix2D(nodes, triangle):
         xi, eta = q[0], q[1]
         for i in range(3):
             for j in range(6):
-                grad_ref = P2Basis.grad(j, xi, eta)
+                grad_ref = P2_grad(j, xi, eta)
                 grad_xy = invJT @ grad_ref
                 B1_local[i, j] += w * grad_xy[0] * detJ / 2
                 B2_local[i, j] += w * grad_xy[1] * detJ / 2
@@ -895,6 +900,41 @@ class P2Basis:
             [(-4*eta), (4 - 4*xi - 8*eta)]
         ]
         return np.array(grads[i])
+    
+@njit
+def P2_basis(i, xi, eta):
+    if i == 0:
+        return (1 - xi - eta) * (1 - 2*xi - 2*eta)
+    elif i == 1:
+        return xi * (2 * xi - 1)
+    elif i == 2:
+        return eta * (2 * eta - 1)
+    elif i == 3:
+        return 4 * xi * (1 - xi - eta)
+    elif i == 4:
+        return 4 * xi * eta
+    elif i == 5:
+        return 4 * eta * (1 - xi - eta)
+    else:
+        return 0.0  # fallback
+
+@njit
+def P2_grad(i, xi, eta):
+    if i == 0:
+        g = 4 * xi + 4 * eta - 3
+        return np.array([g, g])
+    elif i == 1:
+        return np.array([4 * xi - 1, 0.0])
+    elif i == 2:
+        return np.array([0.0, 4 * eta - 1])
+    elif i == 3:
+        return np.array([4 - 8 * xi - 4 * eta, -4 * xi])
+    elif i == 4:
+        return np.array([4 * eta, 4 * xi])
+    elif i == 5:
+        return np.array([-4 * eta, 4 - 4 * xi - 8 * eta])
+    else:
+        return np.array([0.0, 0.0])
     
     
 if __name__ == "__main__":
