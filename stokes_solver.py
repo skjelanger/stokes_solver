@@ -138,14 +138,16 @@ class Simulation:
         
         print("\rAssembling matrices...", end="", flush=True)
         start_matrices = datetime.now()
+        
         alpha = (8*self.mu) / (self.geometry_height ** 2)  # You may need to define geometry_height
+        
         M = MassAssembler2D(nodes, triangles, periodic_map)
         A = StiffnessAssembler2D(nodes, triangles, periodic_map) 
-        A11 = self.mu * A + alpha * M
-        
         B1, B2 = DivergenceAssembler2D(nodes, triangles, pressure_nodes, periodic_map)
         b1, b2 = LoadAssembler2D(nodes, triangles, self.f, periodic_map)
         
+        A11 = self.mu * A + alpha * M
+
         end_matrices = datetime.now()
         print(f"\rAssembled matrices in {(end_matrices - start_matrices).total_seconds():.3f} seconds.")
         
@@ -182,22 +184,21 @@ class Simulation:
         n = self.mesh.nodes.shape[0]
         
         # --- u1 (x-velocity) DOFs ---
-        slave_dof_u1 = self.slave_nodes
+        slave_dof_u1 = self.slave_nodes         
         master_dof_u1 = self.master_nodes
+        for s, m in zip(slave_dof_u1, master_dof_u1):
+            self.lhs.rows[s] = [s, m]
+            self.lhs.data[s] = [1.0, -1.0]
+            self.rhs[s] = 0.0
         
-        self.lhs[slave_dof_u1, :] = 0.0
-        self.lhs[slave_dof_u1, slave_dof_u1] = 1.0
-        self.lhs[slave_dof_u1, master_dof_u1] = -1.0
-        self.rhs[slave_dof_u1] = 0.0
-        
+
         # --- u2 (y-velocity) DOFs ---
         slave_dof_u2 = self.slave_nodes + n
         master_dof_u2 = self.master_nodes + n
-        
-        self.lhs[slave_dof_u2, :] = 0.0
-        self.lhs[slave_dof_u2, slave_dof_u2] = 1.0
-        self.lhs[slave_dof_u2, master_dof_u2] = -1.0
-        self.rhs[slave_dof_u2] = 0.0
+        for s, m in zip(slave_dof_u2, master_dof_u2):
+            self.lhs.rows[s] = [s, m]
+            self.lhs.data[s] = [1.0, -1.0]
+            self.rhs[s] = 0.0
         
         end_slaves = datetime.now()
         print(f"\rFixed slaves {(end_slaves - end_system).total_seconds():.3f} seconds.")
@@ -304,10 +305,11 @@ class Simulation:
         boundary_dofs_u2 = boundary_nodes + n
         all_boundary_dofs = np.concatenate([boundary_dofs_u1, boundary_dofs_u2])
     
-        # Vectorized zeroing of rows and setting diagonal
-        lhs[all_boundary_dofs, :] = 0.0
-        lhs[all_boundary_dofs, all_boundary_dofs] = 1.0
-        rhs[all_boundary_dofs] = 0.0
+        # Zeroing of boundary rows and setting diagonal
+        for dof in all_boundary_dofs:
+            lhs.rows[dof] = [dof]
+            lhs.data[dof] = [1.0]
+            rhs[dof] = 0.0
     
         # --- Fix pressure at one arbitrary node ---
         target_y = 0.5 * np.max(self.mesh.nodes[:, 1])
@@ -410,11 +412,9 @@ class Simulation:
         print(f"Permeability:     {self.permeability} m²")
 
 
-
 def canonical_dof(node, periodic_map):
     """Redirects node to its periodic master if needed."""
     return periodic_map.get(node, node)
-
 
 def LoadAssembler2D(nodes, triangles, f, periodic_map):
     """
@@ -945,7 +945,7 @@ if __name__ == "__main__":
     
     # Define constants
     geometry_length = 0.001 # meters 0.001 is 1mm
-    mesh_size = geometry_length * 0.002 # meters
+    mesh_size = geometry_length * 0.003 # meters
     inner_radius = geometry_length * 0.35
     geometry_height = 0.000091 # 91 micrometer thickness
     mu = 0.00089 # Viscosity Pa*s
