@@ -21,10 +21,6 @@ from datetime import datetime
 import pypardiso
 
 
-os.environ["OMP_NUM_THREADS"] = "12"
-os.environ["MKL_NUM_THREADS"] = "12"
-os.environ["NUMEXPR_NUM_THREADS"] = "12"
-
 class Simulation:
     """
    Simulation of incompressible Stokes flow in a 2D domain with support for
@@ -152,7 +148,6 @@ class Simulation:
         end_matrices = datetime.now()
         print(f"\rAssembled matrices in {(end_matrices - start_matrices).total_seconds():.3f} seconds.")
         
-        
         print("Assembling full system...", end="", flush=True)
 
         B1T = B1.T
@@ -212,21 +207,25 @@ class Simulation:
         self.apply_boundary_conditions()    
         
         # Convert to scr for faster solve.
-        self.lhs_scr = self.lhs.tocsr()
+        self.lhs = self.lhs.tocsr()
         
         # Optional: Check for empty rows *after* all modifications
-        empty_rows = np.where(np.diff(self.lhs_scr.indptr) == 0)[0]
+        empty_rows = np.where(np.diff(self.lhs.indptr) == 0)[0]
         if len(empty_rows) > 0:
             warnings.warn(f"Empty rows in system matrix after boundary condition application: {empty_rows}")
             
+            
+        # clean up matrices
+        del A, M, B1, B2, B1T, B2T
+
         end_BCs = datetime.now()
         print(f"\rHandled BCs in {(end_BCs - end_slaves).total_seconds():.3f} seconds.")
 
         
     def solve(self):
-        sol = pypardiso.spsolve(self.lhs_scr, self.rhs)
+        sol = pypardiso.spsolve(self.lhs, self.rhs)
         
-        residual = self.lhs_scr @ sol - self.rhs
+        residual = self.lhs @ sol - self.rhs
         self.res_norm = np.linalg.norm(residual)
         rhs_norm = np.linalg.norm(self.rhs)
         self.rel_res = self.res_norm / (rhs_norm + 1e-15)  # Avoid divide-by-zero
@@ -341,11 +340,11 @@ class Simulation:
             Tolerance for rank deficiency detection.
         """
         print("\r--- System Debug Info ---")
-        print(f"LHS shape: {self.lhs_scr.shape}")
+        print(f"LHS shape: {self.lhs.shape}")
         print(f"RHS shape: {self.rhs.shape}")
         
         # Check symmetry
-        asymmetry = (self.lhs_scr - self.lhs_scr.T).nnz
+        asymmetry = (self.lhs - self.lhs.T).nnz
         if asymmetry == 0: 
             print("Matrix is exactly symmetric.")
         else:
@@ -355,58 +354,59 @@ class Simulation:
         print("Checking numerical rank (this can be slow for large systems)...")
         try:
             # Compute A*A^T and use sparse QR
-            AtA = self.lhs_scr @ self.lhs_scr.T
+            AtA = self.lhs @ self.lhs.T
             diag = AtA.diagonal()
             numerical_rank = np.sum(np.abs(diag) > tol)
-            print(f"\rNumerical rank estimate: {numerical_rank} / {self.lhs_scr.shape[0]}")
+            print(f"\rNumerical rank estimate: {numerical_rank} / {self.lhs.shape[0]}")
         except Exception as e:
             print(f"\rRank check failed: {e}")
         
         # Print matrix density
-        nnz = self.lhs_scr.nnz
-        total = np.prod(self.lhs_scr.shape)
+        nnz = self.lhs.nnz
+        total = np.prod(self.lhs.shape)
         print(f"Matrix sparsity: {100*nnz/total:.2e}% nonzero entries.")
         print("--- End Debug Info ---")
 
 
     def calculate_permeability(self, direction='y'):
         """
-        Calculates permeability using Darcy's law and properly averages velocity
-        over P2 elements (including mid-edge nodes).
+        Calculates permeability using Darcy's law by averaging the y-velocity
+        over all elements, vectorized for efficiency.
         """
         if direction != 'y':
             raise NotImplementedError("Only vertical permeability (y-direction) is currently supported.")
-    
+        
         u = self.u2  # vertical velocity component
-        nodes = self.mesh.nodes
-        triangles = self.mesh.triangles  # P2 triangles: shape (n_elements, 6)
+        nodes = self.mesh.nodes[:, :2]  # Discard z if present
+        triangles = self.mesh.triangles  # P2 triangles (6 nodes)
     
-        total_flow = 0.0
-        total_area = 0.0
+        # Get vertex coordinates (first 3 nodes of each triangle define geometry)
+        v0 = nodes[triangles[:, 0]]
+        v1 = nodes[triangles[:, 1]]
+        v2 = nodes[triangles[:, 2]]
     
-        for tri in triangles:
-            vertex_coords = nodes[tri[:3], :2]  # Use first 3 nodes to get triangle geometry (area)
-            v0, v1, v2 = vertex_coords
-            area = 0.5 * abs((v1[0] - v0[0]) * (v2[1] - v0[1]) - (v1[1] - v0[1]) * (v2[0] - v0[0]))
+        # Compute triangle areas using vectorized cross product formula
+        area_vec = 0.5 * np.abs((v1[:, 0] - v0[:, 0]) * (v2[:, 1] - v0[:, 1]) -
+                                (v1[:, 1] - v0[:, 1]) * (v2[:, 0] - v0[:, 0]))  # shape (n_triangles,)
     
-            avg_u = np.mean(u[tri])  # <-- Average over all 6 P2 nodes now
-            total_flow += avg_u * area
-            total_area += area
+        # Compute average velocity over each triangle (all 6 P2 nodes)
+        u_avg = np.mean(u[triangles], axis=1)  # shape (n_triangles,)
+    
+        # Total flow and area
+        total_flow = np.sum(u_avg * area_vec)
+        total_area = np.sum(area_vec)
     
         avg_v = total_flow / total_area
+        f_magnitude = abs(self.f(0, 0)[1])  # vertical body force
     
-        f_magnitude = abs(self.f(0, 0)[0 if direction == 'x' else 1])
-    
-        # Apply Darcy's Law with 2/3 parabolic scaling
+        # Apply Darcy's law with parabolic correction
         k = (2 / 3) * self.mu * abs(avg_v) / f_magnitude
-
-        # Store and print
+    
         self.avg_velocity = float(f"{avg_v:.4e}")
         self.permeability = float(f"{k:.4e}")
     
         print(f"Avg velocity:     {self.avg_velocity} m/s")
         print(f"Permeability:     {self.permeability} m²")
-        return
 
 
 
@@ -904,7 +904,7 @@ if __name__ == "__main__":
     
     # Define constants
     geometry_length = 0.001 # meters 0.001 is 1mm
-    mesh_size = geometry_length * 0.002 # meters
+    mesh_size = geometry_length * 0.01 # meters
     inner_radius = geometry_length * 0.35
     geometry_height = 0.000091 # 91 micrometer thickness
     mu = 0.00089 # Viscosity Pa*s

@@ -13,7 +13,7 @@ import meshio
 import numpy as np
 from stokes_solver import Simulation
 from mesher import create_mesh, load_mesh
-
+import matplotlib.pyplot as plt
 
 # Create folders
 os.makedirs("plots", exist_ok=True)
@@ -24,11 +24,17 @@ os.makedirs("logs", exist_ok=True)
 
 # Constants
 geometry_length = 0.001
-inner_radii = geometry_length * np.array([0.35, 0.40, 0.45, 0.47, 0.49])
-mesh_size = geometry_length * np.array([0.0024, 0.0018, 0.0014, 0.0012, 0.0011])
+inner_radii = geometry_length * np.array([0.35, 0.35, 0.35, 0.35, 0.35])
+mesh_size = geometry_length * np.array([0.05, 0.01, 0.006, 0.003, 0.001])
 geometry_height = 0.000091 # 91 micrometer thickness
 mu = 0.00089
 rho = 1000.0
+
+# Tracking results
+mesh_sizes_tracked = []
+inner_radii_tracked = []
+permeabilities = []
+residuals = []
 
 def f(x, y):
     return (0, -1)
@@ -47,6 +53,7 @@ class Logger:
         self.log.write(message)
 
     def flush(self):  # Needed for compatibility with some environments
+    
         self.terminal.flush()
         self.log.flush()
 
@@ -66,7 +73,7 @@ for idx, inner_radius in enumerate(inner_radii, 1):
         mesh.mesh_size = mesh_size[idx - 1]
         load_time = datetime.now()
         print(f"Loaded mesh with {mesh.triangles.shape[0]} elements in {(load_time - mesh_time).total_seconds():.3f} seconds.")
-        
+
         mesh.check_mesh_quality()
         check_time = datetime.now()
         print(f"Checked mesh in {(check_time - load_time).total_seconds():.3f} seconds.")
@@ -81,9 +88,27 @@ for idx, inner_radius in enumerate(inner_radii, 1):
         desc = sim.get_description()
         safe_desc = desc.replace(" ", "_").replace(",", "").replace("=", "").replace(".", "p")
         sim.save(f"simulations/sim_{safe_desc}.pkl")
+        
+        # Store convergence data
+        mesh_sizes_tracked.append(mesh.mesh_size)
+        inner_radii_tracked.append(inner_radius)
+        permeabilities.append(sim.permeability)
+        residuals.append(sim.rel_res)
 
     except Exception as e:
         print(f"Simulation with radius {inner_radius:.2f} FAILED: {e}")
+        
+        
+# Plot residuals vs mesh size
+plt.figure()
+plt.semilogy(mesh_sizes_tracked, residuals, marker='o', color='red')
+plt.xlabel("Mesh size [m]")
+plt.ylabel("Solver Relative Residual")
+plt.title("Solver Convergence")
+plt.grid(True)
+plt.gca().invert_xaxis()
+plt.savefig("plots/solver_residual_convergence.png", dpi=300)
+plt.show()
 
 print("\n=== All simulations completed ===")
 
