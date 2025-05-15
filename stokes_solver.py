@@ -7,6 +7,7 @@ Created on Fri Apr  4 07:15:06 2025
 
 import warnings
 import pickle
+import gzip
 import os
 import meshio
 import numpy as np
@@ -122,13 +123,10 @@ class Simulation:
         return desc
         
     def save(self, filename):
-        with open(filename, "wb") as f:
+        self.lhs = None
+        self.rhs = None
+        with gzip.open(filename, "wb") as f:
             pickle.dump(self, f)
-            
-    @staticmethod
-    def load(filename):
-        with open(filename, "rb") as f:
-            return pickle.load(f)
 
     def assemble(self):
         nodes = self.mesh.nodes
@@ -871,7 +869,7 @@ def load_simulation(filename):
     """
     filepath = f'simulations/{filename}'
     
-    with open(filepath, "rb") as f:
+    with gzip.open(filepath, "rb") as f:
         sim = pickle.load(f)
     print(f"Loaded simulation from '{filename}'")
     return sim
