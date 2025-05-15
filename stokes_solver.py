@@ -410,11 +410,11 @@ class Simulation:
         k = (2 / 3) * self.mu * abs(avg_v) / f_magnitude
     
         avg_velocity = float(f"{avg_v:.4e}")
-        permeability = float(f"{k:.4e}")
+        self.permeability = float(f"{k:.4e}")
     
         print(f"Avg velocity:     {avg_velocity} m/s")
-        print(f"Permeability:     {permeability} m²")
-        return permeability
+        print(f"Permeability:     {self.permeability} m²")
+        return self.permeability
 
 
 def canonical_dof(node, periodic_map):
@@ -956,7 +956,7 @@ if __name__ == "__main__":
     sim.run()
     
     start_calc = datetime.now()
-    sim.permeability = sim.calculate_permeability(direction='y')
+    _ = sim.calculate_permeability(direction='y')
     print(f"Calculated permeability in {(datetime.now()-start_calc).total_seconds():.3f} seconds.")
 
     # Save the entire Simulation object

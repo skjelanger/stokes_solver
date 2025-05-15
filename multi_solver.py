@@ -24,8 +24,8 @@ os.makedirs("logs", exist_ok=True)
 
 # Constants
 geometry_length = 0.001
-inner_radii = geometry_length * np.array([0.45, 0.45, 0.45, 0.45, 0.45, 0.45])
-mesh_size = geometry_length * np.array([0.04, 0.008, 0.003, 0.002, 0.0014, 0.0012])
+inner_radii = geometry_length * np.array([0.45, 0.45, 0.40, 0.40]) # np.array([0.45, 0.45, 0.45, 0.45, 0.45, 0.45])
+mesh_size = geometry_length * np.array([0.1, 0.08, 0.1, 0.07]) # np.array([0.04, 0.008, 0.003, 0.002, 0.0014, 0.0012])
 geometry_height = 0.000091 # 91 micrometer thickness
 mu = 0.00089
 rho = 1000.0
@@ -33,9 +33,7 @@ rho = 1000.0
 # Tracking results
 mesh_sizes_tracked = []
 
-inner_radii_tracked = []
-permeabilities = []
-residuals = []
+results_by_radius = {}  # Dict: radius → dict of lists
 
 def f(x, y):
     return (0, -1)
@@ -90,36 +88,65 @@ for idx, inner_radius in enumerate(inner_radii, 1):
         safe_desc = desc.replace(" ", "_").replace(",", "").replace("=", "").replace(".", "p")
         sim.save(f"simulations/sim_{safe_desc}.pkl")
         
-        # Store convergence data
-        mesh_sizes_tracked.append(mesh.mesh_size)
-        inner_radii_tracked.append(inner_radius)
-        permeabilities.append(sim.permeability)
-        residuals.append(sim.rel_res)
+        # Store convergence data by radius
+        if hasattr(sim, "permeability") and hasattr(sim, "res_norm"):
+            r_key = round(inner_radius, 8)
+            if r_key not in results_by_radius:
+                results_by_radius[r_key] = {
+                    "mesh_sizes": [],
+                    "residuals": [],
+                    "permeabilities": []
+                }
+            results_by_radius[r_key]["mesh_sizes"].append(mesh.mesh_size)
+            results_by_radius[r_key]["residuals"].append(sim.res_norm)
+            results_by_radius[r_key]["permeabilities"].append(sim.permeability)
 
     except Exception as e:
         print(f"Simulation with radius {inner_radius:.2f} FAILED: {e}")
         
         
-# Plot residuals vs mesh size
-plt.figure()
-plt.semilogy(mesh_sizes_tracked, residuals, marker='o', color='C0')
-plt.xlabel("Mesh size [m]")
-plt.ylabel("Solver Relative Residual")
-plt.title("Solver Convergence")
-plt.grid(True)
-plt.gca().invert_xaxis()
-plt.savefig("plots/solver_residual_convergence.png", dpi=300)
+print(f"\nMulti-sim completed: {results_by_radius}.")        
+
+# Group results
+
+if hasattr(sim, "permeability") and hasattr(sim, "res_norm"):
+    r_key = round(inner_radius, 8)  # use float-safe key
+    if r_key not in results_by_radius:
+        results_by_radius[r_key] = {
+            "mesh_sizes": [],
+            "residuals": [],
+            "permeabilities": []
+        }
+    results_by_radius[r_key]["mesh_sizes"].append(mesh.mesh_size)
+    results_by_radius[r_key]["residuals"].append(sim.res_norm)
+    results_by_radius[r_key]["permeabilities"].append(sim.permeability)
+
+# Plot residuals vs mesh size (log-log) for all radii
+plt.figure(figsize=(6, 5), dpi=300)
+for r, data in results_by_radius.items():
+    mesh_sizes_mm = [s * 1000 for s in data["mesh_sizes"]]  # Convert to mm
+    plt.loglog(mesh_sizes_mm, data["residuals"], marker='o', label=f"r = {r*1000:.2f} mm")
+plt.xlabel("Mesh size [mm]")
+plt.ylabel("Solver Residual Norm")
+plt.title("Convergence: Residual vs. Mesh Size (Log-Log)")
+plt.grid(True, which="both", linestyle="--", linewidth=0.5)
+plt.legend(loc='upper right')
+plt.tight_layout()
+plt.savefig("plots/residual_vs_mesh_size_loglog_by_radius.png", dpi=300)
 plt.show()
 
-# Plot permeabilty vs mesh size
-plt.figure()
-plt.semilogy(mesh_sizes_tracked,permeabilities, marker='o', color='C1')
-plt.xlabel("Mesh size [m]")
-plt.ylabel("Solver Relative Residual")
-plt.title("Solver Convergence")
-plt.grid(True)
-plt.gca().invert_xaxis()
-plt.savefig("plots/solver_residual_convergence.png", dpi=300)
+# Plot permeability vs mesh size (log-log) for all radii
+plt.figure(figsize=(6, 5), dpi=300)
+for r, data in results_by_radius.items():
+    mesh_sizes_mm = [s * 1000 for s in data["mesh_sizes"]]  # Convert to mm
+    plt.loglog(mesh_sizes_mm, data["permeabilities"], marker='o', label=f"r = {r*1000:.2f} mm")
+plt.xlabel("Mesh size [mm]")
+plt.ylabel("Permeability [m²]")
+plt.title("Permeability vs. Mesh Size (Log-Log)")
+plt.grid(True, which="both", linestyle="--", linewidth=0.5)
+plt.legend(loc='upper left')
+plt.tight_layout()
+plt.savefig("plots/permeability_vs_mesh_size_loglog_by_radius.png", dpi=300)
 plt.show()
 
 print("\n=== All simulations completed ===")
