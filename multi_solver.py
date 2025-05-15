@@ -24,14 +24,15 @@ os.makedirs("logs", exist_ok=True)
 
 # Constants
 geometry_length = 0.001
-inner_radii = geometry_length * np.array([0.35, 0.35, 0.35, 0.35, 0.35])
-mesh_size = geometry_length * np.array([0.05, 0.01, 0.006, 0.004, 0.0025])
+inner_radii = geometry_length * np.array([0.45, 0.45, 0.45, 0.45, 0.45, 0.45])
+mesh_size = geometry_length * np.array([0.04, 0.008, 0.003, 0.0015, 0.001, 0.0008])
 geometry_height = 0.000091 # 91 micrometer thickness
 mu = 0.00089
 rho = 1000.0
 
 # Tracking results
 mesh_sizes_tracked = []
+
 inner_radii_tracked = []
 permeabilities = []
 residuals = []
@@ -101,7 +102,18 @@ for idx, inner_radius in enumerate(inner_radii, 1):
         
 # Plot residuals vs mesh size
 plt.figure()
-plt.semilogy(mesh_sizes_tracked, residuals, marker='o', color='red')
+plt.semilogy(mesh_sizes_tracked, residuals, marker='o', color='C0')
+plt.xlabel("Mesh size [m]")
+plt.ylabel("Solver Relative Residual")
+plt.title("Solver Convergence")
+plt.grid(True)
+plt.gca().invert_xaxis()
+plt.savefig("plots/solver_residual_convergence.png", dpi=300)
+plt.show()
+
+# Plot permeabilty vs mesh size
+plt.figure()
+plt.semilogy(mesh_sizes_tracked,permeabilities, marker='o', color='C1')
 plt.xlabel("Mesh size [m]")
 plt.ylabel("Solver Relative Residual")
 plt.title("Solver Convergence")

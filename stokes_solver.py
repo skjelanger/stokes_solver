@@ -273,7 +273,7 @@ class Simulation:
         print(f"\rPlotted results in {(end_plot - end_solver).total_seconds():.3f} seconds.")
     
         total_end = datetime.now()
-        print(f"Total runtime: {(total_end - total_start).total_seconds():.3f} seconds.")
+        print(f"Total solver runtime: {(total_end - total_start).total_seconds():.3f} seconds.")
 
         
     def plot(self):
@@ -502,7 +502,7 @@ def localLoadVector2D(nodes, triangle, f):
         fx, fy = f(x, y)
 
         for i in range(6):
-            phi = P2Basis.basis(i, xi, eta)
+            phi = P2_basis(i, xi, eta)
             b1_local[i] += fx * phi * w * detJ / 2
             b2_local[i] += fy * phi * w * detJ / 2
 
@@ -877,31 +877,6 @@ def load_simulation(filename):
     return sim
     
     
-class P2Basis:
-    @staticmethod
-    def basis(i, xi, eta):
-        basis = [
-            (1 - xi - eta) * (1 - 2*xi - 2*eta),
-            xi * (2*xi - 1),
-            eta * (2*eta - 1),
-            4 * xi * (1 - xi - eta),
-            4 * xi * eta,
-            4 * eta * (1 - xi - eta)
-        ]
-        return basis[i]
-    
-    @staticmethod
-    def grad(i, xi, eta):
-        grads = [
-            [(4*xi + 4*eta - 3), (4*xi + 4*eta - 3)],
-            [4*xi - 1, 0],
-            [0, 4*eta - 1],
-            [(4 - 8*xi - 4*eta), (-4*xi)],
-            [4*eta, 4*xi],
-            [(-4*eta), (4 - 4*xi - 8*eta)]
-        ]
-        return np.array(grads[i])
-    
 @njit
 def P2_basis(i, xi, eta):
     if i == 0:
@@ -945,8 +920,8 @@ if __name__ == "__main__":
     
     # Define constants
     geometry_length = 0.001 # meters 0.001 is 1mm
-    mesh_size = geometry_length * 0.003 # meters
-    inner_radius = geometry_length * 0.35
+    mesh_size = geometry_length * 0.0007 # meters
+    inner_radius = geometry_length * 0.47
     geometry_height = 0.000091 # 91 micrometer thickness
     mu = 0.00089 # Viscosity Pa*s
     rho = 1000.0 # Density kg/m^3
