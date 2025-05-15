@@ -262,8 +262,15 @@ class Mesh:
             warnings.warn(f"Maximum aspect ratio is high ({aspect_ratios.max():.2f}). Consider refining mesh.")
         if areas.min() / areas.max() < 0.01:
             warnings.warn("Element size variation is large. Check if size field is behaving as intended.")
+        
+        # Check for duplicate triangles
+        tri_tuples = [tuple(sorted(tri)) for tri in self.triangles]
+        unique_tris = set(tri_tuples)
+        if len(unique_tris) != len(self.triangles):
+            dup_count = len(self.triangles) - len(unique_tris)
+            warnings.warn(f"Detected {dup_count} duplicate triangles in mesh. This may indicate an export or periodicity issue.")
+        
         print("--- End mesh Info ---")
-
     
         if show_histograms:
             plt.figure(figsize=(12, 3))
@@ -573,7 +580,7 @@ if __name__ == "__main__":
     mesh_file = "square_with_hole.msh"
     geometry_length=0.1
     inner_radius = geometry_length * 0.2
-    mesh_size = 0.05 * geometry_length
+    mesh_size = 0.5 * geometry_length
     
     total_start = datetime.now()
 
@@ -588,7 +595,7 @@ if __name__ == "__main__":
     mesh.check_mesh_quality()
 
     print("Plotting mesh...", end="", flush=True)
-    mesh.plot(show_node_ids=False, filename="mesh.png")
+    mesh.plot(show_node_ids=True, filename="mesh.png")
     
     end_mesh = datetime.now()
     print(f"\rMeshed in {(end_mesh - total_start).total_seconds():.3f} seconds")
