@@ -372,44 +372,51 @@ class Simulation:
 
 
     def calculate_permeability(self, direction='y'):
-        """
-        Calculates permeability using Darcy's law by averaging the y-velocity
-        over all elements, vectorized for efficiency.
-        """
         if direction != 'y':
             raise NotImplementedError("Only vertical permeability (y-direction) is currently supported.")
+    
+        triangles = self.mesh.triangles
+        nodes = self.mesh.nodes[:, :2]  # Drop z
+        u = self.u2  # vertical velocity
+    
+        total_flow = 0.0
+        total_area = 0.0
+    
+        for tri in triangles:
+            # Get coordinates of the 3 P1 vertex nodes
+            v0 = nodes[tri[0]]
+            v1 = nodes[tri[1]]
+            v2 = nodes[tri[2]]
+    
+            # Compute area of triangle
+            area = 0.5 * abs(
+                (v1[0] - v0[0]) * (v2[1] - v0[1]) -
+                (v2[0] - v0[0]) * (v1[1] - v0[1])
+            )
+    
+            # Average vertical velocity (all 6 P2 nodes)
+            u_avg = np.mean(u[tri])
+    
+            total_flow += u_avg * area
+            total_area += area
+    
+        # Control area deviation
+        actual_area = (self.geometry_length ** 2 ) - np.pi * (self.inner_radius ** 2)
+        rel_dev = abs(total_area - actual_area) / actual_area
+        print(f"Relative deviation in calculated area: {rel_dev:.3g}")
         
-        u = self.u2  # vertical velocity component
-        nodes = self.mesh.nodes[:, :2]  # Discard z if present
-        triangles = self.mesh.triangles  # P2 triangles (6 nodes)
-    
-        # Get vertex coordinates (first 3 nodes of each triangle define geometry)
-        v0 = nodes[triangles[:, 0]]
-        v1 = nodes[triangles[:, 1]]
-        v2 = nodes[triangles[:, 2]]
-    
-        # Compute triangle areas using vectorized cross product formula
-        area_vec = 0.5 * np.abs((v1[:, 0] - v0[:, 0]) * (v2[:, 1] - v0[:, 1]) -
-                                (v1[:, 1] - v0[:, 1]) * (v2[:, 0] - v0[:, 0]))  # shape (n_triangles,)
-    
-        # Compute average velocity over each triangle (all 6 P2 nodes)
-        u_avg = np.mean(u[triangles], axis=1)  # shape (n_triangles,)
-    
-        # Total flow and area
-        total_flow = np.sum(u_avg * area_vec)
-        total_area = np.sum(area_vec)
-    
         avg_v = total_flow / total_area
-        f_magnitude = abs(self.f(0, 0)[1])  # vertical body force
+        f_magnitude = abs(self.f(0, 0)[1])  # Assume vertical force only
     
-        # Apply Darcy's law with parabolic correction
+        # Darcy's law with parabolic correction
         k = (2 / 3) * self.mu * abs(avg_v) / f_magnitude
     
-        self.avg_velocity = float(f"{avg_v:.4e}")
-        self.permeability = float(f"{k:.4e}")
+        avg_velocity = float(f"{avg_v:.4e}")
+        permeability = float(f"{k:.4e}")
     
-        print(f"Avg velocity:     {self.avg_velocity} m/s")
-        print(f"Permeability:     {self.permeability} m²")
+        print(f"Avg velocity:     {avg_velocity} m/s")
+        print(f"Permeability:     {permeability} m²")
+        return permeability
 
 
 def canonical_dof(node, periodic_map):
@@ -928,7 +935,7 @@ if __name__ == "__main__":
     
     # Body forces
     def f(x, y):
-        return (0, -1)      
+        return (0, -1) # Body force wtih units N/m^3
 
     # Create mesh
     mesh_start = datetime.now()
@@ -951,7 +958,7 @@ if __name__ == "__main__":
     sim.run()
     
     start_calc = datetime.now()
-    sim.calculate_permeability(direction='y')
+    sim.permeability = sim.calculate_permeability(direction='y')
     print(f"Calculated permeability in {(datetime.now()-start_calc).total_seconds():.3f} seconds.")
 
     # Save the entire Simulation object
