@@ -15,6 +15,8 @@ import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
 
 import scipy.sparse as sp
+from scipy.sparse import vstack, hstack
+
 
 from mesher import create_mesh, load_mesh
 from datetime import datetime
@@ -144,7 +146,7 @@ class Simulation:
         B1, B2 = DivergenceAssembler2D(nodes, triangles, pressure_nodes, periodic_map)
         b1, b2 = LoadAssembler2D(nodes, triangles, self.f, periodic_map)
         
-        A11 = self.mu * A + alpha * M
+        A11 = (self.mu * A) + (alpha * M)
 
         end_matrices = datetime.now()
         print(f"\rAssembled matrices in {(end_matrices - start_matrices).total_seconds():.3f} seconds.")
@@ -568,7 +570,6 @@ def localStiffnessMatrix2D(nodes, triangle):
     bary_coords = np.array([
         [1/6, 1/6, 2/3],
         [1/6, 2/3, 1/6],
-        
         [2/3, 1/6, 1/6]
     ])
     weights = np.array([1/3, 1/3, 1/3])
@@ -578,16 +579,15 @@ def localStiffnessMatrix2D(nodes, triangle):
     J = np.column_stack((v1 - v0, v2 - v0))  # Jacobian
     detJ = abs(np.linalg.det(J))
     invJT = np.linalg.inv(J).T
-    G = detJ * (invJT @ invJT.T)
 
-    A_local = np.zeros((6, 6))
-
-    for q, w in zip(bary_coords, weights):
-        xi, eta = q[0], q[1]
+    A_local = np.zeros((6,6))
+    for (xi,eta,_), w in zip(bary_coords, weights):
         for i in range(6):
+            gradN_i = invJT @ P2_grad(i, xi, eta)
             for j in range(6):
-                A_local[i, j] += w * (P2_grad(i, xi, eta) @ G @ P2_grad(j, xi, eta)) / 2
-
+                gradN_j = invJT @ P2_grad(j, xi, eta)
+                A_local[i,j] += w * (gradN_i @ gradN_j) * (detJ/2)
+                
     return A_local
 
 def MassAssembler2D(nodes, triangles, periodic_map):
@@ -637,10 +637,10 @@ def localMassMatrix2D(nodes, triangle):
         Local mass matrix.
     """
     coords = nodes[triangle][:, :2]
-    v0, v1, v2 = coords[:3]
 
-    # Jacobian
-    J = np.column_stack((v1 - v0, v2 - v0))
+    # Build affine map from reference triangle to real triangle (vertices only)
+    v0, v1, v2 = coords[:3]
+    J = np.column_stack((v1 - v0, v2 - v0))  # Jacobian
     detJ = abs(np.linalg.det(J))
 
     # Barycentric quadrature
@@ -655,8 +655,11 @@ def localMassMatrix2D(nodes, triangle):
 
     for q, w in zip(bary_coords, weights):
         xi, eta = q[0], q[1]
-        phi = np.array([P2_basis(i, xi, eta) for i in range(6)])
-        M_local += w * np.outer(phi, phi) * detJ / 2
+        for i in range(6):
+            N_i = P2_basis(i, xi, eta)
+            for j in range(6):
+                N_j = P2_basis(j, xi, eta)
+                M_local[i, j] += w * (N_i * N_j ) * detJ / 2
 
     return M_local
 
@@ -703,7 +706,7 @@ def DivergenceAssembler2D(nodes, triangles, pressure_nodes, periodic_map):
                     B1[p_idx, v_node] += B1_local[i, j]
                     B2[p_idx, v_node] += B2_local[i, j]
 
-    return B1, B2
+    return -B1, -B2 # Minus sign from defintion of our divergence matrix
 
 @njit
 def localDivergenceMatrix2D(nodes, triangle):
@@ -744,20 +747,27 @@ def localDivergenceMatrix2D(nodes, triangle):
         [2/3, 1/6, 1/6]
     ])
     weights = np.array([1/3, 1/3, 1/3])
-
+    
     B1_local = np.zeros((3, 6))
     B2_local = np.zeros((3, 6))
 
     for q, w in zip(bary_coords, weights):
         xi, eta = q[0], q[1]
+        
+        # P1 basis functions (pressure) at quadrature point
+        chi = np.array([
+            1.0 - xi - eta,  # chi_0
+            xi,              # chi_1
+            eta              # chi_2
+        ])
+        
         for i in range(3):
             for j in range(6):
-                grad_ref = P2_grad(j, xi, eta)
-                grad_xy = invJT @ grad_ref
-                B1_local[i, j] += w * grad_xy[0] * detJ / 2
-                B2_local[i, j] += w * grad_xy[1] * detJ / 2
+                gradN_j = invJT @ P2_grad(j, xi, eta)
+                B1_local[i, j] += chi[i] * gradN_j[0] * w * detJ / 2
+                B2_local[i, j] += chi[i] * gradN_j[1] * w * detJ / 2
 
-    return -B1_local, -B2_local # Minus sign from defintion of our divergence matrix
+    return B1_local, B2_local 
 
 def plot_velocity_magnitude(mesh, u1, u2, title_suffix=""):
     magnitude = np.sqrt(u1**2 + u2**2)
@@ -925,7 +935,7 @@ if __name__ == "__main__":
     
     # Define constants
     geometry_length = 0.001 # meters 0.001 is 1mm
-    mesh_size = geometry_length * 0.003 # meters
+    mesh_size = geometry_length * 0.008 # meters
     inner_radius = geometry_length * 0.45
     geometry_height = 0.000091 # 91 micrometer thickness
     mu = 0.00089 # Viscosity Pa*s
