@@ -925,8 +925,8 @@ if __name__ == "__main__":
     
     # Define constants
     geometry_length = 0.001 # meters 0.001 is 1mm
-    mesh_size = geometry_length * 0.005 # meters
-    inner_radius = geometry_length * 0.47
+    mesh_size = geometry_length * 0.003 # meters
+    inner_radius = geometry_length * 0.45
     geometry_height = 0.000091 # 91 micrometer thickness
     mu = 0.00089 # Viscosity Pa*s
     rho = 1000.0 # Density kg/m^3

@@ -413,10 +413,11 @@ def create_mesh(geometry_length=0.01, mesh_size=0.0001, inner_radius=0.004, outp
     # Set background mesh size
     gmsh.model.mesh.field.setAsBackgroundMesh(2)
     
-    # Generate P2 mesh!
-    gmsh.model.mesh.setOrder(2)  # Make sure this is BEFORE generate()
-    gmsh.option.setNumber("Mesh.ElementOrder", 2)  # optional, reinforces the intent
-    gmsh.option.setNumber("Mesh.SecondOrderIncomplete", 0)  # use complete P2 elements
+    # Set P2 with linear edges
+    gmsh.model.mesh.setOrder(2)
+    gmsh.option.setNumber("Mesh.ElementOrder", 2)
+    gmsh.option.setNumber("Mesh.SecondOrderLinear", 1)  # Make the triangles straight-lined
+    gmsh.option.setNumber("Mesh.HighOrderOptimize", 0)
 
     gmsh.model.mesh.generate(2)
 
