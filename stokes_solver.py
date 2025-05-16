@@ -509,9 +509,9 @@ def localLoadVector2D(nodes, triangle, f):
         fx, fy = f(x, y)
 
         for i in range(6):
-            phi = P2_basis(i, xi, eta)
-            b1_local[i] += fx * phi * w * detJ / 2
-            b2_local[i] += fy * phi * w * detJ / 2
+            N_i = P2_basis(i, xi, eta)
+            b1_local[i] += fx * N_i * w * detJ / 2
+            b2_local[i] += fy * N_i * w * detJ / 2
 
     return b1_local, b2_local
 
