@@ -15,15 +15,12 @@ import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
 
 import scipy.sparse as sp
-from scipy.sparse import vstack, hstack
-
 
 from mesher import create_mesh, load_mesh
 from datetime import datetime
 
 import pypardiso
 from numba import njit
-
 
 class Simulation:
     """
@@ -132,14 +129,15 @@ class Simulation:
 
     def assemble(self):
         nodes = self.mesh.nodes
-        triangles = self.mesh.triangles
-        pressure_nodes = self.mesh.pressure_nodes
-        periodic_map = self.mesh.periodic_map
+        triangles = self.mesh.triangles # P2 elements (6 nodes per triangle)
+        pressure_nodes = self.mesh.pressure_nodes # P1 nodes (vertices)
+        periodic_map = self.mesh.periodic_map # Dictionary mapping slave_node_idx -> master_node_idx
         
         print("\rAssembling matrices...", end="", flush=True)
         start_matrices = datetime.now()
         
-        alpha = (8*self.mu) / (self.geometry_height ** 2)  # You may need to define geometry_height
+        # Coefficient for the drag term (from - (8*mu/H^2)*v )
+        alpha = (8*self.mu) / (self.geometry_height ** 2)
         
         M = MassAssembler2D(nodes, triangles, periodic_map)
         A = StiffnessAssembler2D(nodes, triangles, periodic_map) 
@@ -153,8 +151,8 @@ class Simulation:
         
         print("Assembling full system...", end="", flush=True)
 
-        B1T = B1.T
-        B2T = B2.T
+        B1T = B1.T.tocsr()
+        B2T = B2.T.tocsr()
 
         n = A11.shape[0]
         m = len(self.mesh.pressure_nodes)
@@ -178,7 +176,7 @@ class Simulation:
         print(f"\rAssembled final system {(end_system - end_matrices).total_seconds():.3f} seconds.")
         
         # Enforce periodicity (slave-master)
-        print("Handling slaves...", end="", flush=True)
+        print("Handling periodic boundary conditions...", end="", flush=True)
         self.slave_nodes = np.array(list(self.mesh.periodic_map.keys()))
         self.master_nodes = np.array([self.mesh.periodic_map[node] for node in self.slave_nodes])
         n = self.mesh.nodes.shape[0]
@@ -200,8 +198,8 @@ class Simulation:
             self.lhs.data[s] = [1.0, -1.0]
             self.rhs[s] = 0.0
         
-        end_slaves = datetime.now()
-        print(f"\rFixed slaves {(end_slaves - end_system).total_seconds():.3f} seconds.")
+        end_periodicity = datetime.now()
+        print(f"\rHandled periodic BCs in {(end_periodicity - end_system).total_seconds():.3f} seconds.")
         
         print("Handling BC's and cleaning up...", end="", flush=True)
 
@@ -216,12 +214,11 @@ class Simulation:
         if len(empty_rows) > 0:
             warnings.warn(f"Empty rows in system matrix after boundary condition application: {empty_rows}")
             
-            
-        # clean up matrices
-        del A, M, B1, B2, B1T, B2T
-
         end_BCs = datetime.now()
-        print(f"\rHandled BCs in {(end_BCs - end_slaves).total_seconds():.3f} seconds.")
+        print(f"\rHandled BCs in {(end_BCs - end_periodicity).total_seconds():.3f} seconds.")
+        
+        # Clean up intermediate matrices to save memory
+        del A, M, B1, B2, B1T, B2T, A11
 
         
     def solve(self):
@@ -232,8 +229,10 @@ class Simulation:
         rhs_norm = np.linalg.norm(self.rhs)
         self.rel_res = self.res_norm / (rhs_norm + 1e-15)  # Avoid divide-by-zero
         
-        if rhs_norm < 1e-12:
-            warnings.warn("RHS vector has very small norm; system may be underconstrained or incorrectly assembled.")
+        if rhs_norm < 1e-12 and self.res_norm > 1e-9 : # If RHS is virtually zero, residual should also be
+             warnings.warn(f"RHS vector norm is very small ({rhs_norm:.2e}), but residual norm is {self.res_norm:.2e}. Solution might be problematic.")
+        elif self.rel_res > 1e-6: # Arbitrary threshold for concerning relative residual
+             warnings.warn(f"Relative residual norm is high: {self.rel_res:.2e}. Solution accuracy may be poor.")
 
         n = self.mesh.nodes.shape[0]
     
@@ -388,7 +387,8 @@ class Simulation:
             v1 = nodes[tri[1]]
             v2 = nodes[tri[2]]
     
-            # Compute area of triangle
+            # Compute area of the triangle using vertex coordinates
+            # Area = 0.5 * |(x1-x0)(y2-y0) - (x2-x0)(y1-y0)|
             area = 0.5 * abs(
                 (v1[0] - v0[0]) * (v2[1] - v0[1]) -
                 (v2[0] - v0[0]) * (v1[1] - v0[1])
@@ -400,11 +400,19 @@ class Simulation:
             total_flow += u_avg * area
             total_area += area
     
-        # Control area deviation
-        actual_area = (self.geometry_length ** 2 ) - np.pi * (self.inner_radius ** 2)
-        rel_dev = abs(total_area - actual_area) / actual_area
-        print(f"Relative deviation in calculated area: {rel_dev:.3g}")
-        
+        # Check consistency of calculated total area with expected geometry area
+        # (This is a sanity check for the mesh reading and area calculation)
+        if hasattr(self, 'geometry_length') and hasattr(self, 'inner_radius'):
+            expected_domain_area = (self.geometry_length ** 2) - np.pi * (self.inner_radius ** 2) # Assuming square with circular hole
+            rel_area_dev = abs(total_area - expected_domain_area) / expected_domain_area if expected_domain_area > 1e-9 else 0
+            print(f"Calculated total domain area: {total_area:.4e} m^2")
+            print(f"Expected domain area: {expected_domain_area:.4e} m^2 (Rel. dev: {rel_area_dev:.3g})")
+        else:
+            print(f"Calculated total domain area: {total_area:.4e} m^2 (Expected area not computed).")
+
+        if total_area < 1e-9: # Avoid division by zero
+            warnings.warn("Total domain area is very small or zero. Permeability calculation might be unreliable.")
+            
         avg_v = total_flow / total_area
         f_magnitude = abs(self.f(0, 0)[1])  # Assume vertical force only
     
@@ -490,28 +498,27 @@ def localLoadVector2D(nodes, triangle, f):
 
     # Affine transform to real triangle
     J = np.column_stack((v1 - v0, v2 - v0))
-    detJ = abs(np.linalg.det(J))
+    area = abs(np.linalg.det(J))/2
 
     # Barycentric quadrature points and weights
     bary_coords = np.array([
-        [1/6, 1/6, 2/3],
-        [1/6, 2/3, 1/6],
-        [2/3, 1/6, 1/6]
+        [1/6, 1/6],
+        [1/6, 2/3],
+        [2/3, 1/6]
     ])
     weights = np.array([1/3, 1/3, 1/3])
 
     b1_local = np.zeros(6)
     b2_local = np.zeros(6)
 
-    for q, w in zip(bary_coords, weights):
-        xi, eta = q[0], q[1]
+    for (xi,eta), w in zip(bary_coords, weights):
         x, y = v0 + xi * (v1 - v0) + eta * (v2 - v0)
         fx, fy = f(x, y)
 
         for i in range(6):
             N_i = P2_basis(i, xi, eta)
-            b1_local[i] += fx * N_i * w * detJ / 2
-            b2_local[i] += fy * N_i * w * detJ / 2
+            b1_local[i] += fx * N_i * w * area
+            b2_local[i] += fy * N_i * w * area
 
     return b1_local, b2_local
 
@@ -568,25 +575,25 @@ def localStiffnessMatrix2D(nodes, triangle):
 
     # Quadrature points and weights in barycentric coordinates
     bary_coords = np.array([
-        [1/6, 1/6, 2/3],
-        [1/6, 2/3, 1/6],
-        [2/3, 1/6, 1/6]
+        [1/6, 1/6],
+        [1/6, 2/3],
+        [2/3, 1/6]
     ])
     weights = np.array([1/3, 1/3, 1/3])
 
     # Build affine map from reference triangle to real triangle (vertices only)
     v0, v1, v2 = coords[:3]
     J = np.column_stack((v1 - v0, v2 - v0))  # Jacobian
-    detJ = abs(np.linalg.det(J))
+    area = abs(np.linalg.det(J)) / 2
     invJT = np.linalg.inv(J).T
 
     A_local = np.zeros((6,6))
-    for (xi,eta,_), w in zip(bary_coords, weights):
+    for (xi,eta), w in zip(bary_coords, weights):
         for i in range(6):
             gradN_i = invJT @ P2_grad(i, xi, eta)
             for j in range(6):
                 gradN_j = invJT @ P2_grad(j, xi, eta)
-                A_local[i,j] += w * (gradN_i @ gradN_j) * (detJ/2)
+                A_local[i,j] += w * (gradN_i @ gradN_j) * area
                 
     return A_local
 
@@ -641,25 +648,33 @@ def localMassMatrix2D(nodes, triangle):
     # Build affine map from reference triangle to real triangle (vertices only)
     v0, v1, v2 = coords[:3]
     J = np.column_stack((v1 - v0, v2 - v0))  # Jacobian
-    detJ = abs(np.linalg.det(J))
+    area = abs(np.linalg.det(J)) / 2
 
-    # Barycentric quadrature
     bary_coords = np.array([
-        [1/6, 1/6, 2/3],
-        [1/6, 2/3, 1/6],
-        [2/3, 1/6, 1/6]
+        [0.445948490915965, 0.445948490915965],
+        [0.445948490915965, 0.108103018168070],
+        [0.108103018168070, 0.445948490915965],
+        [0.091576213509771, 0.091576213509771],
+        [0.091576213509771, 0.816847572980459],
+        [0.816847572980459, 0.091576213509771],
     ])
-    weights = np.array([1/3, 1/3, 1/3])
+    weights = np.array([
+        0.223381589678011,
+        0.223381589678011,
+        0.223381589678011,
+        0.109951743655322,
+        0.109951743655322,
+        0.109951743655322,
+    ])
 
     M_local = np.zeros((6, 6))
 
-    for q, w in zip(bary_coords, weights):
-        xi, eta = q[0], q[1]
+    for (xi,eta), w in zip(bary_coords, weights):
         for i in range(6):
             N_i = P2_basis(i, xi, eta)
             for j in range(6):
                 N_j = P2_basis(j, xi, eta)
-                M_local[i, j] += w * (N_i * N_j ) * detJ / 2
+                M_local[i, j] += w * (N_i * N_j ) * area
 
     return M_local
 
@@ -737,22 +752,21 @@ def localDivergenceMatrix2D(nodes, triangle):
 
     # Build Jacobian for affine map
     J = np.column_stack((v1 - v0, v2 - v0))
-    detJ = abs(np.linalg.det(J))
+    area = abs(np.linalg.det(J)) / 2
     invJT = np.linalg.inv(J).T
 
     # Quadrature points (same as in stiffness matrix)
     bary_coords = np.array([
-        [1/6, 1/6, 2/3],
-        [1/6, 2/3, 1/6],
-        [2/3, 1/6, 1/6]
+        [1/6, 1/6],
+        [1/6, 2/3],
+        [2/3, 1/6]
     ])
     weights = np.array([1/3, 1/3, 1/3])
     
     B1_local = np.zeros((3, 6))
     B2_local = np.zeros((3, 6))
 
-    for q, w in zip(bary_coords, weights):
-        xi, eta = q[0], q[1]
+    for (xi,eta), w in zip(bary_coords, weights):
         
         # P1 basis functions (pressure) at quadrature point
         chi = np.array([
@@ -764,8 +778,8 @@ def localDivergenceMatrix2D(nodes, triangle):
         for i in range(3):
             for j in range(6):
                 gradN_j = invJT @ P2_grad(j, xi, eta)
-                B1_local[i, j] += chi[i] * gradN_j[0] * w * detJ / 2
-                B2_local[i, j] += chi[i] * gradN_j[1] * w * detJ / 2
+                B1_local[i, j] += chi[i] * gradN_j[0] * w * area
+                B2_local[i, j] += chi[i] * gradN_j[1] * w * area
 
     return B1_local, B2_local 
 
@@ -936,7 +950,7 @@ if __name__ == "__main__":
     # Define constants
     geometry_length = 0.001 # meters 0.001 is 1mm
     mesh_size = geometry_length * 0.008 # meters
-    inner_radius = geometry_length * 0.45
+    inner_radius = geometry_length * 0.35
     geometry_height = 0.000091 # 91 micrometer thickness
     mu = 0.00089 # Viscosity Pa*s
     rho = 1000.0 # Density kg/m^3
@@ -955,7 +969,8 @@ if __name__ == "__main__":
     mesh = load_mesh(raw_mesh)
     mesh.mesh_size = mesh_size  # manually attach it
     load_time = datetime.now()
-    print(f"Loaded mesh with length: {geometry_length} and radius: {inner_radius}, with {mesh.triangles.shape[0]} elements in {(load_time - mesh_time).total_seconds():.3f} seconds.")
+    print(f"Mesh loaded: {mesh.triangles.shape[0]} P2 elements, {mesh.nodes.shape[0]} P2 nodes.")
+    print(f"Mesh loading and processing time: {(load_time - mesh_time).total_seconds():.3f} seconds.")
 
     mesh.check_mesh_quality()
     check_time = datetime.now()
@@ -963,6 +978,7 @@ if __name__ == "__main__":
 
     # Setup and run simulation
     sim = Simulation(mesh, f, geometry_length, inner_radius, geometry_height, mu=mu, rho=rho)
+    print(f"Simulation parameters: {sim.get_description()}")
     sim.run()
     
     start_calc = datetime.now()
