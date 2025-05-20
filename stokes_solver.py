@@ -137,7 +137,7 @@ class Simulation:
         start_matrices = datetime.now()
         
         # Coefficient for the drag term (from - (8*mu/H^2)*v )
-        alpha = (8*self.mu) / (self.geometry_height ** 2)
+        alpha = (8*self.mu) / (self.geometry_height **2)
         
         M = MassAssembler2D(nodes, triangles, periodic_map)
         A = StiffnessAssembler2D(nodes, triangles, periodic_map) 
@@ -360,6 +360,8 @@ class Simulation:
             diag = AtA.diagonal()
             numerical_rank = np.sum(np.abs(diag) > tol)
             print(f"\rNumerical rank estimate: {numerical_rank} / {self.lhs.shape[0]}")
+            if numerical_rank < self.lhs.shape[0]:
+                warnings.warn("System matrix is numerically rank deficient. This could cause instability or ill-conditioning.")
         except Exception as e:
             print(f"\rRank check failed: {e}")
         
@@ -403,10 +405,17 @@ class Simulation:
         # Check consistency of calculated total area with expected geometry area
         # (This is a sanity check for the mesh reading and area calculation)
         if hasattr(self, 'geometry_length') and hasattr(self, 'inner_radius'):
-            expected_domain_area = (self.geometry_length ** 2) - np.pi * (self.inner_radius ** 2) # Assuming square with circular hole
+            if self.inner_radius:
+                print("Assuming square domain with hole.")
+                expected_domain_area = (self.geometry_length ** 2) - np.pi * (self.inner_radius ** 2) # Assuming square with circular hole
+            else:
+                print("Assuming square domain.")
+                expected_domain_area = (self.geometry_length ** 2) 
+            
             rel_area_dev = abs(total_area - expected_domain_area) / expected_domain_area if expected_domain_area > 1e-9 else 0
             print(f"Calculated total domain area: {total_area:.4e} m^2")
             print(f"Expected domain area: {expected_domain_area:.4e} m^2 (Rel. dev: {rel_area_dev:.3g})")
+            
         else:
             print(f"Calculated total domain area: {total_area:.4e} m^2 (Expected area not computed).")
 
@@ -512,7 +521,7 @@ def localLoadVector2D(nodes, triangle, f):
     b2_local = np.zeros(6)
 
     for (xi,eta), w in zip(bary_coords, weights):
-        x, y = v0 + xi * (v1 - v0) + eta * (v2 - v0)
+        x, y = v0 + xi * (v1-v0) + eta * (v2-v0)        
         fx, fy = f(x, y)
 
         for i in range(6):
@@ -552,7 +561,7 @@ def StiffnessAssembler2D(nodes, triangles, periodic_map):
                 A[i_global, j_global] += A_local[i, j]
     return A
 
-@njit
+#@njit
 def localStiffnessMatrix2D(nodes, triangle):
     """
     Compute local stiffness matrix for a P2 (quadratic) triangle using 3-point 
@@ -571,8 +580,9 @@ def localStiffnessMatrix2D(nodes, triangle):
     A_local : ndarray of shape (6, 6)
         Local stiffness matrix.
     """
-    coords = nodes[triangle][:, :2]  # Removing z-coordinates - shape (6, 2)
-
+    coords = nodes[triangle][:, :2]  # Removing z-coordinates
+    v0, v1, v2 = coords[:3]
+    
     # Quadrature points and weights in barycentric coordinates
     bary_coords = np.array([
         [1/6, 1/6],
@@ -582,7 +592,6 @@ def localStiffnessMatrix2D(nodes, triangle):
     weights = np.array([1/3, 1/3, 1/3])
 
     # Build affine map from reference triangle to real triangle (vertices only)
-    v0, v1, v2 = coords[:3]
     J = np.column_stack((v1 - v0, v2 - v0))  # Jacobian
     area = abs(np.linalg.det(J)) / 2
     invJT = np.linalg.inv(J).T
@@ -590,7 +599,10 @@ def localStiffnessMatrix2D(nodes, triangle):
     A_local = np.zeros((6,6))
     for (xi,eta), w in zip(bary_coords, weights):
         for i in range(6):
-            gradN_i = invJT @ P2_grad(i, xi, eta)
+            g1 = P2_grad(i, xi, eta)
+            if np.all(g1 == 0.0):
+                print("ERROR ZERO GRADIENT")
+            gradN_i = invJT @ g1
             for j in range(6):
                 gradN_j = invJT @ P2_grad(j, xi, eta)
                 A_local[i,j] += w * (gradN_i @ gradN_j) * area
@@ -840,7 +852,6 @@ def plot_pressure(mesh, pressure, title_suffix=""):
     plt.show()
     plt.close()
 
-    # --- NEW: Print some useful statistics ---
     print(f"Max pressure: {np.max(pressure):.4e} Pa")
     print(f"Min pressure: {np.min(pressure):.4e} Pa")
     return
@@ -921,13 +932,12 @@ def P2_basis(i, xi, eta):
     elif i == 5:
         return 4 * eta * (1 - xi - eta)
     else:
-        return 0.0  # fallback
+        return 0
 
 @njit
 def P2_grad(i, xi, eta):
     if i == 0:
-        g = 4 * xi + 4 * eta - 3
-        return np.array([g, g])
+        return np.array([4 * xi + 4 * eta - 3, 4 * xi + 4 * eta - 3])
     elif i == 1:
         return np.array([4 * xi - 1, 0.0])
     elif i == 2:
@@ -939,8 +949,7 @@ def P2_grad(i, xi, eta):
     elif i == 5:
         return np.array([-4 * eta, 4 - 4 * xi - 8 * eta])
     else:
-        return np.array([0.0, 0.0])
-    
+        return np.array([0.0, 0.0])    
     
 if __name__ == "__main__":
     # Create folders if it does not exist
@@ -949,8 +958,8 @@ if __name__ == "__main__":
     
     # Define constants
     geometry_length = 0.001 # meters 0.001 is 1mm
-    mesh_size = geometry_length * 0.008 # meters
-    inner_radius = geometry_length * 0.35
+    mesh_size = geometry_length * 0.02 # meters
+    inner_radius = geometry_length * 0.4
     geometry_height = 0.000091 # 91 micrometer thickness
     mu = 0.00089 # Viscosity Pa*s
     rho = 1000.0 # Density kg/m^3

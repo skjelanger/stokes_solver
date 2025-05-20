@@ -269,7 +269,8 @@ class Mesh:
         if len(unique_tris) != len(self.triangles):
             dup_count = len(self.triangles) - len(unique_tris)
             warnings.warn(f"Detected {dup_count} duplicate triangles in mesh. This may indicate an export or periodicity issue.")
-        
+        else:
+            print("No duplicate triangles found after meshing.")
         print("--- End mesh Info ---")
     
         if show_histograms:
@@ -324,7 +325,6 @@ def create_mesh(geometry_length=0.01, mesh_size=0.0001, inner_radius=0.004, outp
     None
     """
     gmsh.initialize()
-
     gmsh.model.add(output_file.rstrip(".msh"))
     
     l = geometry_length
@@ -339,7 +339,6 @@ def create_mesh(geometry_length=0.01, mesh_size=0.0001, inner_radius=0.004, outp
     l2 = gmsh.model.occ.addLine(s_p2, s_p3)  # right
     l3 = gmsh.model.occ.addLine(s_p3, s_p4)  # top
     l4 = gmsh.model.occ.addLine(s_p4, s_p1)  # left
-    
     
     gmsh.model.occ.synchronize()
 
@@ -384,7 +383,6 @@ def create_mesh(geometry_length=0.01, mesh_size=0.0001, inner_radius=0.004, outp
     circle_loop = gmsh.model.occ.addCurveLoop([arc1, arc2, arc3, arc4])
     circle_surface = gmsh.model.occ.addPlaneSurface([circle_loop])
     
-
     # Subtract circle from square
     [cut_surface], _ = gmsh.model.occ.cut([(2, square_surface)], [(2, circle_surface)])
     gmsh.model.occ.synchronize()  # <--- Synchronize BEFORE mesh field setup
@@ -581,7 +579,7 @@ if __name__ == "__main__":
     mesh_file = "square_with_hole.msh"
     geometry_length=0.1
     inner_radius = geometry_length * 0.2
-    mesh_size = 0.5 * geometry_length
+    mesh_size = 0.8 * geometry_length
     
     total_start = datetime.now()
 
