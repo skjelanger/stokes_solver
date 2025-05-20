@@ -141,7 +141,7 @@ class Simulation:
         
         M = MassAssembler2D(nodes, triangles, periodic_map)
         A = StiffnessAssembler2D(nodes, triangles, periodic_map) 
-        B1, B2 = DivergenceAssembler2D(nodes, triangles, pressure_nodes, self.mesh.pressure_index_map)
+        B1, B2 = DivergenceAssembler2D(nodes, triangles, pressure_nodes, self.mesh.pressure_index_map, periodic_map)
         b1, b2 = LoadAssembler2D(nodes, triangles, self.f, periodic_map)
         
         A11 = (self.mu * A) + (alpha * M)
@@ -291,13 +291,9 @@ class Simulation:
         n = self.mesh.nodes.shape[0]
         lhs = self.lhs.tolil()  # Faster for row operations
         rhs = self.rhs
-        periodic_slaves = set(self.mesh.periodic_map.keys())
     
         # --- Collect all unique boundary nodes ---
         boundary_nodes = np.unique(np.array(self.mesh.interior_boundary_edges).flatten())
-        
-        # Remove periodic slave nodes
-        boundary_nodes = np.array([node for node in boundary_nodes if node not in periodic_slaves])
     
         # Create velocity DOFs: u1 (x) and u2 (y)
         boundary_dofs_u1 = boundary_nodes
@@ -468,10 +464,10 @@ def LoadAssembler2D(nodes, triangles, f, periodic_map):
     b1 = np.zeros(n_nodes)
     b2 = np.zeros(n_nodes)
 
-    for triangle in triangles:
-        b1_local, b2_local = localLoadVector2D(nodes, triangle, f)
+    for tri in triangles:
+        b1_local, b2_local = localLoadVector2D(nodes, tri, f)
         for i in range(6):
-            node = canonical_dof(triangle[i], periodic_map)
+            node = canonical_dof(tri[i], periodic_map)
             b1[node] += b1_local[i]
             b2[node] += b2_local[i]
 
@@ -553,14 +549,23 @@ def StiffnessAssembler2D(nodes, triangles, periodic_map):
     n_nodes = nodes.shape[0]
     A = sp.lil_matrix((n_nodes, n_nodes))
 
-    for triangle in triangles:
-        A_local = localStiffnessMatrix2D(nodes, triangle)
+    for tri in triangles:
+        A_local = localStiffnessMatrix2D(nodes, tri)
         for i in range(6):
-            i_global = canonical_dof(triangle[i], periodic_map)
+            i_global = canonical_dof(tri[i], periodic_map)
             for j in range(6):
-                j_global = canonical_dof(triangle[j], periodic_map)
+                j_global = canonical_dof(tri[j], periodic_map)
                 A[i_global, j_global] += A_local[i, j]
     return A
+
+def check_triangle_area(coords):
+    v0, v1, v2 = coords[:3]
+    # Shoelace formula
+    area_geom = 0.5 * abs(
+        (v1[0] - v0[0]) * (v2[1] - v0[1]) -
+        (v2[0] - v0[0]) * (v1[1] - v0[1])
+    )
+    return area_geom
 
 @njit
 def localStiffnessMatrix2D(nodes, triangle):
@@ -594,7 +599,7 @@ def localStiffnessMatrix2D(nodes, triangle):
 
     # Build affine map from reference triangle to real triangle (vertices only)
     J = np.column_stack((v1 - v0, v2 - v0))  # Jacobian
-    area = abs(np.linalg.det(J)) / 2
+    area = abs(np.linalg.det(J)) / 2    
     invJT = np.linalg.inv(J).T
 
     A_local = np.zeros((6,6))
@@ -628,12 +633,12 @@ def MassAssembler2D(nodes, triangles, periodic_map):
     n_nodes = nodes.shape[0]
     M = sp.lil_matrix((n_nodes, n_nodes))
 
-    for triangle in triangles:
-        M_local = localMassMatrix2D(nodes, triangle)
+    for tri in triangles:
+        M_local = localMassMatrix2D(nodes, tri)
         for i in range(6):
-            i_global = canonical_dof(triangle[i], periodic_map)
+            i_global = canonical_dof(tri[i], periodic_map)
             for j in range(6):
-                j_global = canonical_dof(triangle[j], periodic_map)
+                j_global = canonical_dof(tri[j], periodic_map)
                 M[i_global, j_global] += M_local[i, j]
     return M
 
@@ -694,7 +699,7 @@ def localMassMatrix2D(nodes, triangle):
     return M_local
 
 
-def DivergenceAssembler2D(nodes, triangles, pressure_nodes, pressure_index_map):
+def DivergenceAssembler2D(nodes, triangles, pressure_nodes, pressure_index_map, periodic_map):
     """
     Assembles the global divergence matrices B1 and B2, from P2 velocity degrees 
     of freedom and P1 pressure degrees of freedom. 
@@ -726,13 +731,11 @@ def DivergenceAssembler2D(nodes, triangles, pressure_nodes, pressure_index_map):
     for tri in triangles:
         B1_local, B2_local = localDivergenceMatrix2D(nodes, tri)
         for i in range(3):  # Only first 3 nodes of each triangle are vertex nodes (P1)
-            p_node = tri[i]
-            if p_node in pressure_index_map:
-                p_idx = pressure_index_map[p_node]
-                for j in range(6):
-                    v_indx = tri[j] 
-                    B1[p_idx, v_indx] += B1_local[i, j]
-                    B2[p_idx, v_indx] += B2_local[i, j]
+            p_idx = pressure_index_map[tri[i]]
+            for j in range(6):
+                v_indx = canonical_dof(tri[j], periodic_map)
+                B1[p_idx, v_indx] += B1_local[i, j]
+                B2[p_idx, v_indx] += B2_local[i, j]
 
     return -B1, -B2 # Minus sign from defintion of our divergence matrix
 
@@ -964,7 +967,7 @@ if __name__ == "__main__":
     # Define constants
     geometry_length = 0.001 # meters 0.001 is 1mm
     mesh_size = geometry_length * 0.02 # meters
-    inner_radius = geometry_length * 0.35
+    inner_radius = geometry_length * 0.45
     geometry_height = 0.000091 # 91 micrometer thickness
     mu = 0.00089 # Viscosity Pa*s
     rho = 1000.0 # Density kg/m^3

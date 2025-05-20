@@ -270,6 +270,16 @@ class Mesh:
             warnings.warn(f"Detected {dup_count} duplicate triangles in mesh. This may indicate an export or periodicity issue.")
         else:
             print("No duplicate triangles found after meshing.")
+            
+        # check for duplicate nodes
+        node_tuples = [tuple(np.round(node[:2], decimals=12)) for node in self.nodes]
+        unique_nodes = set(node_tuples)
+        if len(unique_nodes) != len(self.nodes):
+            dup_count = len(self.nodes) - len(unique_nodes)
+            warnings.warn(f"Detected {dup_count} duplicate nodes in mesh. This may indicate an export or periodicity issue.")
+        else:
+            print("No duplicate nodes found after meshing.")
+            
         print("--- End mesh Info ---")
     
         if show_histograms:
