@@ -141,7 +141,7 @@ class Simulation:
         
         M = MassAssembler2D(nodes, triangles, periodic_map)
         A = StiffnessAssembler2D(nodes, triangles, periodic_map) 
-        B1, B2 = DivergenceAssembler2D(nodes, triangles, pressure_nodes, periodic_map)
+        B1, B2 = DivergenceAssembler2D(nodes, triangles, pressure_nodes, self.mesh.pressure_index_map)
         b1, b2 = LoadAssembler2D(nodes, triangles, self.f, periodic_map)
         
         A11 = (self.mu * A) + (alpha * M)
@@ -311,8 +311,8 @@ class Simulation:
             rhs[dof] = 0.0
     
         # --- Fix pressure at one arbitrary node ---
-        target_y = 0.5 * np.max(self.mesh.nodes[:, 1])
-        target_x = 0.1
+        target_y = 0 * np.max(self.mesh.nodes[:, 1])
+        target_x = 0.5 * np.max(self.mesh.nodes[:, 0])
         anchor_node = min(
             self.mesh.pressure_nodes,
             key=lambda idx: (self.mesh.nodes[idx][1] - target_y)**2 + (self.mesh.nodes[idx][0] - target_x)**2
@@ -556,8 +556,8 @@ def StiffnessAssembler2D(nodes, triangles, periodic_map):
     for triangle in triangles:
         A_local = localStiffnessMatrix2D(nodes, triangle)
         for i in range(6):
+            i_global = canonical_dof(triangle[i], periodic_map)
             for j in range(6):
-                i_global = canonical_dof(triangle[i], periodic_map)
                 j_global = canonical_dof(triangle[j], periodic_map)
                 A[i_global, j_global] += A_local[i, j]
     return A
@@ -631,8 +631,8 @@ def MassAssembler2D(nodes, triangles, periodic_map):
     for triangle in triangles:
         M_local = localMassMatrix2D(nodes, triangle)
         for i in range(6):
+            i_global = canonical_dof(triangle[i], periodic_map)
             for j in range(6):
-                i_global = canonical_dof(triangle[i], periodic_map)
                 j_global = canonical_dof(triangle[j], periodic_map)
                 M[i_global, j_global] += M_local[i, j]
     return M
@@ -694,7 +694,7 @@ def localMassMatrix2D(nodes, triangle):
     return M_local
 
 
-def DivergenceAssembler2D(nodes, triangles, pressure_nodes, periodic_map):
+def DivergenceAssembler2D(nodes, triangles, pressure_nodes, pressure_index_map):
     """
     Assembles the global divergence matrices B1 and B2, from P2 velocity degrees 
     of freedom and P1 pressure degrees of freedom. 
@@ -718,8 +718,6 @@ def DivergenceAssembler2D(nodes, triangles, pressure_nodes, periodic_map):
     B1, B2
     """
     
-    pressure_index_map = {node: i for i, node in enumerate(pressure_nodes)}
-
     n_p = len(pressure_nodes)
     n_v = nodes.shape[0]  # velocity nodes (P2)
     B1 = sp.lil_matrix((n_p, n_v))
@@ -732,9 +730,9 @@ def DivergenceAssembler2D(nodes, triangles, pressure_nodes, periodic_map):
             if p_node in pressure_index_map:
                 p_idx = pressure_index_map[p_node]
                 for j in range(6):
-                    v_node = canonical_dof(tri[j], periodic_map)
-                    B1[p_idx, v_node] += B1_local[i, j]
-                    B2[p_idx, v_node] += B2_local[i, j]
+                    v_indx = tri[j] 
+                    B1[p_idx, v_indx] += B1_local[i, j]
+                    B2[p_idx, v_indx] += B2_local[i, j]
 
     return -B1, -B2 # Minus sign from defintion of our divergence matrix
 

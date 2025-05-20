@@ -132,7 +132,6 @@ class Mesh:
         #draw_edges(self.inlet_edges, 'C3', 'Inlet')
         #draw_edges(self.outlet_edges, 'C4', 'Outlet')
 
-    
         # Remove duplicate labels
         handles, labels = plt.gca().get_legend_handles_labels()
         by_label = dict(zip(labels, handles))
@@ -304,6 +303,86 @@ class Mesh:
         }
 
 
+    def plot_pressure_nodes(self, filename="pressure_nodes.png", annotate=False):
+        """
+        Plots only the P1 (pressure) nodes over the mesh.
+    
+        Parameters
+        ----------
+        filename : str
+            File to save the image to.
+    
+        annotate : bool
+            Whether to annotate node indices.
+        """
+        plt.figure(figsize=(6, 6))
+        coords = self.nodes[self.pressure_nodes]
+        x = coords[:, 0] * 1000  # mm
+        y = coords[:, 1] * 1000
+    
+        plt.scatter(x, y, c='C3', s=10, label='Pressure Nodes (P1)')
+    
+        if annotate:
+            for idx, (xi, yi) in zip(self.pressure_nodes, coords):
+                plt.text(xi * 1000, yi * 1000, str(idx), fontsize=6, color='black',
+                         ha='center', va='center')
+    
+        # Use full self.nodes here, because triangle indices are global
+        for tri in self.triangles:
+            pts = self.nodes[tri[:3], :2] * 1000  # scale to mm
+            plt.plot(np.append(pts[:, 0], pts[0, 0]), np.append(pts[:, 1], pts[0, 1]),
+                     color='lightgray', linewidth=0.5)
+    
+        plt.title("Pressure Nodes (P1)")
+        plt.xlabel("x [mm]")
+        plt.ylabel("y [mm]")
+        plt.gca().set_aspect("equal")
+        plt.tight_layout()
+        plt.savefig(filename, dpi=300)
+        plt.show()
+        print(f"Saved pressure node plot to {filename}.")
+
+
+    def plot_velocity_nodes(self, filename="velocity_nodes.png", annotate=False):
+        """
+        Plots all P2 (velocity) nodes in the mesh.
+    
+        Parameters
+        ----------
+        filename : str
+            File to save the image to.
+    
+        annotate : bool
+            Whether to annotate node indices.
+        """
+        plt.figure(figsize=(6, 6))
+        coords = self.nodes[:, :2]
+    
+        x = coords[:, 0] * 1000  # mm
+        y = coords[:, 1] * 1000
+    
+        plt.scatter(x, y, c='C0', s=10, label='Velocity Nodes (P2)')
+    
+        if annotate:
+            for idx, (xi, yi) in enumerate(coords):
+                plt.text(xi * 1000, yi * 1000, str(idx), fontsize=6, color='black',
+                         ha='center', va='center')
+                
+        # Use full self.nodes here, because triangle indices are global
+        for tri in self.triangles:
+            pts = self.nodes[tri[:3], :2] * 1000  # scale to mm
+            plt.plot(np.append(pts[:, 0], pts[0, 0]), np.append(pts[:, 1], pts[0, 1]),
+                     color='lightgray', linewidth=0.5)
+    
+        plt.title("Velocity Nodes (P2)")
+        plt.xlabel("x [mm]")
+        plt.ylabel("y [mm]")
+        plt.gca().set_aspect("equal")
+        plt.tight_layout()
+        plt.savefig(filename, dpi=300)
+        plt.show()
+        print(f"Saved velocity node plot to {filename}.")
+    
 
 def create_mesh(geometry_length=0.01, mesh_size=0.0001, inner_radius=0.004, output_file="square_with_hole.msh"):
     """
