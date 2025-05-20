@@ -128,7 +128,7 @@ class Mesh:
     
         draw_edges(self.interior_edges, 'C0', 'Interior')
         draw_edges(self.interior_boundary_edges, 'C1', 'Interior wall')
-        draw_edges(self.exterior_boundary_edges, 'C2', 'Exterior wall')
+        draw_edges(self.exterior_boundary_edges, 'C2', 'Perioidc BC')
         #draw_edges(self.inlet_edges, 'C3', 'Inlet')
         #draw_edges(self.outlet_edges, 'C4', 'Outlet')
 
@@ -579,7 +579,7 @@ if __name__ == "__main__":
     mesh_file = "square_with_hole.msh"
     geometry_length=0.1
     inner_radius = geometry_length * 0.2
-    mesh_size = 0.8 * geometry_length
+    mesh_size = 0.25 * geometry_length
     
     total_start = datetime.now()
 
@@ -594,7 +594,7 @@ if __name__ == "__main__":
     mesh.check_mesh_quality()
 
     print("Plotting mesh...", end="", flush=True)
-    mesh.plot(show_node_ids=True, filename="mesh.png")
+    mesh.plot(show_node_ids=False, filename="mesh.png")
     
     end_mesh = datetime.now()
     print(f"\rMeshed in {(end_mesh - total_start).total_seconds():.3f} seconds")

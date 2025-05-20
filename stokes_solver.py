@@ -511,17 +511,18 @@ def localLoadVector2D(nodes, triangle, f):
 
     # Barycentric quadrature points and weights
     bary_coords = np.array([
-        [1/6, 1/6],
-        [1/6, 2/3],
-        [2/3, 1/6]
+        [1/2, 1/2, 0],
+        [0, 1/2, 1/2],
+        [1/2, 0, 1/2]
     ])
     weights = np.array([1/3, 1/3, 1/3])
 
     b1_local = np.zeros(6)
     b2_local = np.zeros(6)
 
-    for (xi,eta), w in zip(bary_coords, weights):
-        x, y = v0 + xi * (v1-v0) + eta * (v2-v0)        
+    for (L1, L2, L3), w in zip(bary_coords, weights):
+        xi, eta = L2, L3
+        x, y = L1 * v0 + L2 * v1 + L3 * v2  # barycentric to Cartesian
         fx, fy = f(x, y)
 
         for i in range(6):
@@ -561,7 +562,7 @@ def StiffnessAssembler2D(nodes, triangles, periodic_map):
                 A[i_global, j_global] += A_local[i, j]
     return A
 
-#@njit
+@njit
 def localStiffnessMatrix2D(nodes, triangle):
     """
     Compute local stiffness matrix for a P2 (quadratic) triangle using 3-point 
@@ -585,9 +586,9 @@ def localStiffnessMatrix2D(nodes, triangle):
     
     # Quadrature points and weights in barycentric coordinates
     bary_coords = np.array([
-        [1/6, 1/6],
-        [1/6, 2/3],
-        [2/3, 1/6]
+        [1/2, 1/2, 0],
+        [0, 1/2, 1/2],
+        [1/2, 0, 1/2]
     ])
     weights = np.array([1/3, 1/3, 1/3])
 
@@ -597,11 +598,10 @@ def localStiffnessMatrix2D(nodes, triangle):
     invJT = np.linalg.inv(J).T
 
     A_local = np.zeros((6,6))
-    for (xi,eta), w in zip(bary_coords, weights):
+    for (L1, L2, L3), w in zip(bary_coords, weights):
+        xi, eta = L2, L3
         for i in range(6):
             g1 = P2_grad(i, xi, eta)
-            if np.all(g1 == 0.0):
-                print("ERROR ZERO GRADIENT")
             gradN_i = invJT @ g1
             for j in range(6):
                 gradN_j = invJT @ P2_grad(j, xi, eta)
@@ -663,26 +663,29 @@ def localMassMatrix2D(nodes, triangle):
     area = abs(np.linalg.det(J)) / 2
 
     bary_coords = np.array([
-        [0.445948490915965, 0.445948490915965],
-        [0.445948490915965, 0.108103018168070],
-        [0.108103018168070, 0.445948490915965],
-        [0.091576213509771, 0.091576213509771],
-        [0.091576213509771, 0.816847572980459],
-        [0.816847572980459, 0.091576213509771],
+        [1/3, 1/3, 1/3],
+        [0.0597158717, 0.4701420641, 0.4701420641],
+        [0.4701420641, 0.0597158717, 0.4701420641],
+        [0.4701420641, 0.4701420641, 0.0597158717],
+        [0.7974269853, 0.1012865073, 0.1012865073],
+        [0.1012865073, 0.7974269853, 0.1012865073],
+        [0.1012865073, 0.1012865073, 0.7974269853],
     ])
     weights = np.array([
-        0.223381589678011,
-        0.223381589678011,
-        0.223381589678011,
-        0.109951743655322,
-        0.109951743655322,
-        0.109951743655322,
+        0.225,
+        0.1323941527,
+        0.1323941527,
+        0.1323941527,
+        0.1259391805,
+        0.1259391805,
+        0.1259391805,
     ])
 
     M_local = np.zeros((6, 6))
 
-    for (xi,eta), w in zip(bary_coords, weights):
+    for (L1, L2, L3), w in zip(bary_coords, weights):
         for i in range(6):
+            xi, eta = L2, L3
             N_i = P2_basis(i, xi, eta)
             for j in range(6):
                 N_j = P2_basis(j, xi, eta)
@@ -769,29 +772,23 @@ def localDivergenceMatrix2D(nodes, triangle):
 
     # Quadrature points (same as in stiffness matrix)
     bary_coords = np.array([
-        [1/6, 1/6],
-        [1/6, 2/3],
-        [2/3, 1/6]
+        [1/2, 1/2, 0],
+        [0, 1/2, 1/2],
+        [1/2, 0, 1/2]
     ])
     weights = np.array([1/3, 1/3, 1/3])
     
     B1_local = np.zeros((3, 6))
     B2_local = np.zeros((3, 6))
 
-    for (xi,eta), w in zip(bary_coords, weights):
-        
-        # P1 basis functions (pressure) at quadrature point
-        chi = np.array([
-            1.0 - xi - eta,  # chi_0
-            xi,              # chi_1
-            eta              # chi_2
-        ])
-        
+    for (L1, L2, L3), w in zip(bary_coords, weights):
+        xi, eta = L2, L3
         for i in range(3):
+            M_i = P1_basis(i, xi, eta)
             for j in range(6):
                 gradN_j = invJT @ P2_grad(j, xi, eta)
-                B1_local[i, j] += chi[i] * gradN_j[0] * w * area
-                B2_local[i, j] += chi[i] * gradN_j[1] * w * area
+                B1_local[i, j] += M_i * gradN_j[0] * w * area
+                B2_local[i, j] += M_i * gradN_j[1] * w * area
 
     return B1_local, B2_local 
 
@@ -916,6 +913,16 @@ def load_simulation(filename):
     print(f"Loaded simulation from '{filename}'")
     return sim
     
+@njit
+def P1_basis(i, xi, eta):
+    if i == 0:
+        return (1 - xi - eta)
+    elif i == 1:
+        return xi
+    elif i == 2:
+        return eta
+    else:
+        return 0
     
 @njit
 def P2_basis(i, xi, eta):
@@ -959,7 +966,7 @@ if __name__ == "__main__":
     # Define constants
     geometry_length = 0.001 # meters 0.001 is 1mm
     mesh_size = geometry_length * 0.02 # meters
-    inner_radius = geometry_length * 0.4
+    inner_radius = geometry_length * 0.35
     geometry_height = 0.000091 # 91 micrometer thickness
     mu = 0.00089 # Viscosity Pa*s
     rho = 1000.0 # Density kg/m^3
