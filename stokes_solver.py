@@ -17,7 +17,7 @@ import matplotlib.tri as mtri
 
 import scipy.sparse as sp
 
-from mesher import create_mesh, load_mesh
+from tiled_mesher import create_mesh, load_mesh
 from datetime import datetime
 
 import pypardiso
@@ -972,8 +972,8 @@ if __name__ == "__main__":
     
     # Define constants
     geometry_length = 0.001 # meters 0.001 is 1mm
-    mesh_size = geometry_length * 0.01 # meters
-    inner_radius = geometry_length * 0.45
+    mesh_size = geometry_length * 0.02 # meters
+    inner_radius = geometry_length * 0.40
     geometry_height = 0.000091 # 91 micrometer thickness
     mu = 0.00089 # Viscosity Pa*s
     rho = 1000.0 # Density kg/m^3
@@ -984,7 +984,7 @@ if __name__ == "__main__":
 
     # Create mesh
     mesh_start = datetime.now()
-    create_mesh(geometry_length, mesh_size, inner_radius, "square_with_hole.msh")
+    create_mesh(3,4,geometry_length, mesh_size, inner_radius, "square_with_hole.msh")
     mesh_time = datetime.now()
     print(f"Created mesh in in {(mesh_time - mesh_start).total_seconds():.3f} seconds.")
 
