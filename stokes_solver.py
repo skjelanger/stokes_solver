@@ -867,7 +867,7 @@ def plot_velocity_vectors(mesh, u1, u2, title_suffix=""):
     v = u2
 
     magnitude = np.sqrt(u**2 + v**2)
-    N = min(2500, len(u))  # Number of vectors to show
+    N = min(1000, len(u))  # Number of vectors to show
     idx = np.random.choice(len(u), size=N, replace=False)
 
     # Normalize vectors for uniform length
@@ -972,7 +972,7 @@ if __name__ == "__main__":
     
     # Define constants
     geometry_length = 0.001 # meters 0.001 is 1mm
-    mesh_size = geometry_length * 0.02 # meters
+    mesh_size = geometry_length * 0.01 # meters
     inner_radius = geometry_length * 0.45
     geometry_height = 0.000091 # 91 micrometer thickness
     mu = 0.00089 # Viscosity Pa*s
