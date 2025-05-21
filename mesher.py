@@ -75,10 +75,12 @@ class Mesh:
                  interior_boundary_edges=None, exterior_boundary_edges=None, 
                  inlet_edges=None, 
                  outlet_edges=None,
-                 periodic_map=None):
+                 periodic_map=None,
+                 wall_edges=None):
         self.nodes = nodes
         self.triangles = triangles
         self.interior_edges = interior_edges
+        self.wall_edges = wall_edges
         self.interior_boundary_edges = interior_boundary_edges or []
         self.exterior_boundary_edges = exterior_boundary_edges or []        
         self.inlet_edges = inlet_edges or []
@@ -128,10 +130,11 @@ class Mesh:
                 plt.plot(x_vals, y_vals, color, linewidth=1.2, label=label)
     
         draw_edges(self.interior_edges, 'C0', 'Interior')
-        draw_edges(self.interior_boundary_edges, 'C1', 'Interior wall')
-        draw_edges(self.exterior_boundary_edges, 'C2', 'Periodic BC')
-        #draw_edges(self.inlet_edges, 'C3', 'Inlet')
-        #draw_edges(self.outlet_edges, 'C4', 'Outlet')
+        #draw_edges(self.interior_boundary_edges, 'C1', 'Interior wall')
+        #draw_edges(self.exterior_boundary_edges, 'C2', 'Periodic BC')
+        draw_edges(self.inlet_edges, 'C3', 'Inlet')
+        draw_edges(self.outlet_edges, 'C4', 'Outlet')
+        draw_edges(self.wall_edges, 'C6', 'Wall')
 
         # Remove duplicate labels
         handles, labels = plt.gca().get_legend_handles_labels()
@@ -395,7 +398,7 @@ class Mesh:
         print(f"Saved velocity node plot to {filename}.")
     
 
-def create_mesh(geometry_length=0.01, mesh_size=0.0001, inner_radius=0.004, output_file="square_with_hole.msh"):
+def create_mesh(geometry_length=0.01, mesh_size=0.0001, inner_radius=0.004, output_file="square_with_hole.msh", periodic=True):
     """
     Generates a 2D unstructured P2 triangular mesh of a square domain with a circular hole.
 
@@ -432,27 +435,28 @@ def create_mesh(geometry_length=0.01, mesh_size=0.0001, inner_radius=0.004, outp
     
     gmsh.model.occ.synchronize()
 
-    # --- Add periodicity: bottom (l1) is master, top (l3) is slave ---
-    gmsh.model.mesh.setPeriodic(
-        1,      # 1D entities (curves)
-        [l3],   # slave: top boundary curve
-        [l1],   # master: bottom boundary curve
-        [1, 0, 0, 0,     # x' = x
-         0, 1, 0, -l,    # y' = y - l → shift top to align with bottom
-         0, 0, 1, 0,     # z unchanged
-         0, 0, 0, 1]     # homogeneous coordinate
-    )
-    
-    # --- Add periodicity: left (l4) is master, right (l2) is slave ---
-    gmsh.model.mesh.setPeriodic(
-        1,      # 1D entities (curves)
-        [l2],   # slave: right
-        [l4],   # master: left
-        [1, 0, 0, -l,    # x' = x - l
-         0, 1, 0, 0,     # y' = y
-         0, 0, 1, 0,     # z unchanged
-         0, 0, 0, 1]     # homogeneous coordinate
-    )
+    if periodic:
+        # --- Add periodicity: bottom (l1) is master, top (l3) is slave ---
+        gmsh.model.mesh.setPeriodic(
+            1,      # 1D entities (curves)
+            [l3],   # slave: top boundary curve
+            [l1],   # master: bottom boundary curve
+            [1, 0, 0, 0,     # x' = x
+             0, 1, 0, -l,    # y' = y - l → shift top to align with bottom
+             0, 0, 1, 0,     # z unchanged
+             0, 0, 0, 1]     # homogeneous coordinate
+        )
+        
+        # --- Add periodicity: left (l4) is master, right (l2) is slave ---
+        gmsh.model.mesh.setPeriodic(
+            1,      # 1D entities (curves)
+            [l2],   # slave: right
+            [l4],   # master: left
+            [1, 0, 0, -l,    # x' = x - l
+             0, 1, 0, 0,     # y' = y
+             0, 0, 1, 0,     # z unchanged
+             0, 0, 0, 1]     # homogeneous coordinate
+        )
 
     square_loop = gmsh.model.occ.addCurveLoop([l1, l2, l3, l4])
     square_surface = gmsh.model.occ.addPlaneSurface([square_loop])
@@ -515,7 +519,7 @@ def create_mesh(geometry_length=0.01, mesh_size=0.0001, inner_radius=0.004, outp
 
     return
 
-def load_mesh(mesh=None):
+def load_mesh(mesh=None, periodic=False):
     """
     Load a mesh from file or memory and classify its edges.
 
@@ -570,19 +574,24 @@ def load_mesh(mesh=None):
     exterior_boundary_edges = []
     inlet_edges = []
     outlet_edges = []
+    wall_edges = []
 
     for edge, count in edge_list.items():
         if count == 1:  # boundary edge
             # First  check if inlet or outlet
             p1, p2 = nodes[edge[0]], nodes[edge[1]]
             x1, x2 = p1[0], p2[0]
-            
+            y1, y2 = p1[1], p2[1]
+
             xmax = np.max(nodes)
-            if np.isclose(x1, 0.0) and np.isclose(x2, 0.0):
-                inlet_edges.append(edge)
-            elif np.isclose(x1, xmax) and np.isclose(x2, xmax):
-                outlet_edges.append(edge)
-            
+            xmin = np.min(nodes)
+            if np.isclose(y1, xmax) and np.isclose(y2, xmax):
+                inlet_edges.append(edge)  # Top → inflow
+            elif np.isclose(y1, xmin) and np.isclose(y2, xmin):
+                outlet_edges.append(edge)  # Bottom → outflow
+            else:
+                wall_edges.append(edge)
+                
             # Then check if interior or exterior
             margin = 1e-7  # numerical tolerance
             xc = (p1[0] + p2[0]) / 2
@@ -607,10 +616,6 @@ def load_mesh(mesh=None):
     pressure_nodes = np.unique(pressure_nodes)
     pressure_index_map = {node: i for i, node in enumerate(pressure_nodes)}
     
-    # Create periodic map, mapping masters and slaves
-    x_map = find_periodic_pairs(nodes, axis=0)
-    y_map = find_periodic_pairs(nodes, axis=1)
-    periodic_map = {**x_map, **y_map}
 
     # Initialize mesh class
     mesh = Mesh(
@@ -619,12 +624,18 @@ def load_mesh(mesh=None):
         pressure_nodes=pressure_nodes,
         pressure_index_map=pressure_index_map,
         interior_edges=interior_edges,
+        wall_edges=wall_edges,
         interior_boundary_edges=interior_boundary_edges,
         exterior_boundary_edges=exterior_boundary_edges,
         inlet_edges=inlet_edges,
-        outlet_edges=outlet_edges,
-        periodic_map=periodic_map
+        outlet_edges=outlet_edges
     )
+    
+    if periodic:
+        # Create periodic map, mapping masters and slaves
+        x_map = find_periodic_pairs(nodes, axis=0)
+        y_map = find_periodic_pairs(nodes, axis=1)
+        mesh.periodic_map = {**x_map, **y_map}
 
     return mesh
 
