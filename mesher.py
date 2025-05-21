@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# mesher.py
 """
 Created on Fri Apr 25 11:23:45 2025
 
@@ -479,8 +480,8 @@ def create_mesh(geometry_length=0.01, mesh_size=0.0001, inner_radius=0.004, outp
     # Define points near which we want finer mesh (e.g., near circle center)
     p_left_circle = gmsh.model.occ.addPoint((geometry_length/2)-inner_radius, geometry_length/2, 0)
     p_right_circle = gmsh.model.occ.addPoint((geometry_length/2)+inner_radius, geometry_length/2, 0)
-    p_left_wall = gmsh.model.occ.addPoint(geometry_length, geometry_length/2, 0)
-    p_right_wall = gmsh.model.occ.addPoint(0, geometry_length/2, 0)
+    p_right_wall = gmsh.model.occ.addPoint(geometry_length, geometry_length/2, 0)
+    p_left_wall = gmsh.model.occ.addPoint(0, geometry_length/2, 0)
     
     gmsh.model.occ.synchronize()
     
@@ -668,7 +669,7 @@ if __name__ == "__main__":
     mesh_file = "square_with_hole.msh"
     geometry_length=0.1
     inner_radius = geometry_length * 0.2
-    mesh_size = 0.25 * geometry_length
+    mesh_size = 1 * geometry_length
     
     total_start = datetime.now()
 
@@ -683,7 +684,7 @@ if __name__ == "__main__":
     mesh.check_mesh_quality()
 
     print("Plotting mesh...", end="", flush=True)
-    mesh.plot(show_node_ids=False, filename="mesh.png")
+    mesh.plot(show_node_ids=True, filename="mesh.png")
     
     end_mesh = datetime.now()
     print(f"\rMeshed in {(end_mesh - total_start).total_seconds():.3f} seconds")

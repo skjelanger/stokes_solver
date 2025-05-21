@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# stokes_solver.py
 """
 Created on Fri Apr  4 07:15:06 2025
 
@@ -240,9 +241,6 @@ class Simulation:
         self.u2 = sol[n:2*n]
         self.p = sol[2*n:]
         
-        # Copies the correct velocity from the master to the slave
-        self.u1[self.slave_nodes] = self.u1[self.master_nodes]
-        self.u2[self.slave_nodes] = self.u2[self.master_nodes]
 
     def run(self):
         total_start = datetime.now()
@@ -379,23 +377,40 @@ class Simulation:
         total_flow = 0.0
         total_area = 0.0
     
+        # Barycentric quadrature points (xi, eta) and weights
+        quad_points = np.array([
+            [1/3, 1/3, 1/3],
+            [0.0597158717, 0.4701420641, 0.4701420641],
+            [0.4701420641, 0.0597158717, 0.4701420641],
+            [0.4701420641, 0.4701420641, 0.0597158717],
+            [0.7974269853, 0.1012865073, 0.1012865073],
+            [0.1012865073, 0.7974269853, 0.1012865073],
+            [0.1012865073, 0.1012865073, 0.7974269853],
+        ])
+        weights = np.array([
+            0.225,
+            0.1323941527,
+            0.1323941527,
+            0.1323941527,
+            0.1259391805,
+            0.1259391805,
+            0.1259391805,
+        ])
+         
         for tri in triangles:
-            # Get coordinates of the 3 P1 vertex nodes
-            v0 = nodes[tri[0]]
-            v1 = nodes[tri[1]]
-            v2 = nodes[tri[2]]
-    
-            # Compute area of the triangle using vertex coordinates
-            # Area = 0.5 * |(x1-x0)(y2-y0) - (x2-x0)(y1-y0)|
-            area = 0.5 * abs(
-                (v1[0] - v0[0]) * (v2[1] - v0[1]) -
-                (v2[0] - v0[0]) * (v1[1] - v0[1])
-            )
-    
-            # Average vertical velocity (all 6 P2 nodes)
-            u_avg = np.mean(u[tri])
-    
-            total_flow += u_avg * area
+            coords = nodes[tri][:, :2]
+            v0, v1, v2 = coords[:3]
+            J = np.column_stack((v1 - v0, v2 - v0))
+            area = abs(np.linalg.det(J)) / 2
+         
+            u_tri = u[tri]
+            for (L1, L2, L3), w in zip(quad_points, weights):
+                xi, eta = L2, L3
+                # Evaluate shape functions at quadrature point
+                N = np.array([P2_basis(i, xi, eta) for i in range(6)])
+                u_val = N @ u_tri
+                total_flow += u_val * w * area
+            
             total_area += area
     
         # Check consistency of calculated total area with expected geometry area
@@ -558,14 +573,6 @@ def StiffnessAssembler2D(nodes, triangles, periodic_map):
                 A[i_global, j_global] += A_local[i, j]
     return A
 
-def check_triangle_area(coords):
-    v0, v1, v2 = coords[:3]
-    # Shoelace formula
-    area_geom = 0.5 * abs(
-        (v1[0] - v0[0]) * (v2[1] - v0[1]) -
-        (v2[0] - v0[0]) * (v1[1] - v0[1])
-    )
-    return area_geom
 
 @njit
 def localStiffnessMatrix2D(nodes, triangle):
@@ -606,8 +613,7 @@ def localStiffnessMatrix2D(nodes, triangle):
     for (L1, L2, L3), w in zip(bary_coords, weights):
         xi, eta = L2, L3
         for i in range(6):
-            g1 = P2_grad(i, xi, eta)
-            gradN_i = invJT @ g1
+            gradN_i = invJT @ P2_grad(i, xi, eta)
             for j in range(6):
                 gradN_j = invJT @ P2_grad(j, xi, eta)
                 A_local[i,j] += w * (gradN_i @ gradN_j) * area
