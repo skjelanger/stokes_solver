@@ -62,7 +62,7 @@ class Mesh:
         Plots the mesh geometry, including edge types and optionally node IDs.
         Saves the plot as a PNG image.
 
-    plot_periodic_pairs()
+    plot_periodic_()
         Visualizes periodic slave-master node pairs using color-coded markers.
         Saves the plot as a PNG image.
 
@@ -132,9 +132,9 @@ class Mesh:
         draw_edges(self.interior_edges, 'C0', 'Interior')
         #draw_edges(self.interior_boundary_edges, 'C1', 'Interior wall')
         #draw_edges(self.exterior_boundary_edges, 'C2', 'Periodic BC')
-        draw_edges(self.inlet_edges, 'C3', 'Inlet')
-        draw_edges(self.outlet_edges, 'C4', 'Outlet')
-        draw_edges(self.wall_edges, 'C6', 'Wall')
+        draw_edges(self.inlet_edges, 'C1', 'Inlet')
+        draw_edges(self.outlet_edges, 'C2', 'Outlet')
+        draw_edges(self.wall_edges, 'C3', 'Wall')
 
         # Remove duplicate labels
         handles, labels = plt.gca().get_legend_handles_labels()
@@ -153,7 +153,7 @@ class Mesh:
         print(f"\rPlotted mesh in {(end_plot - start_plot).total_seconds():.3f} seconds.")
         print(f"Mesh plot saved as {filename}.")
 
-    def plot_periodic_pairs(self):
+    def plot_periodic(self):
         """
         Plots each periodic slave/master node pair with a unique color and marker.
         """
@@ -315,7 +315,10 @@ class Mesh:
             "max_aspect_ratio": aspect_ratios.max(),
             "area_range": (areas.min(), areas.max())
         }
-
+    
+    def plot_nodes(self, annotate=False):
+        self.plot_pressure_nodes(filename="pressure_nodes.png", annotate=annotate)
+        self.plot_velocity_nodes(filename="velocity_nodes.png", annotate=annotate)
 
     def plot_pressure_nodes(self, filename="pressure_nodes.png", annotate=False):
         """
@@ -355,7 +358,6 @@ class Mesh:
         plt.savefig(filename, dpi=300)
         plt.show()
         print(f"Saved pressure node plot to {filename}.")
-
 
     def plot_velocity_nodes(self, filename="velocity_nodes.png", annotate=False):
         """
@@ -611,11 +613,18 @@ def load_mesh(mesh=None, periodic=False):
         else:
             print(f"ERROR! Edge appears f{count} times.")
             
-    # Pressure node info (P1 nodes only)
-    pressure_nodes = triangles[:, :3].flatten()
-    pressure_nodes = np.unique(pressure_nodes)
+            
+    # Store pressure nodes
+    pressure_nodes = np.unique(triangles[:, :3].flatten())
     pressure_index_map = {node: i for i, node in enumerate(pressure_nodes)}
-    
+            
+    if periodic:
+        # Create periodic map, mapping masters and slaves
+        x_map = find_periodic_pairs(nodes, axis=0)
+        y_map = find_periodic_pairs(nodes, axis=1)
+        periodic_map = {**x_map, **y_map}
+    else:
+        periodic_map = {}            
 
     # Initialize mesh class
     mesh = Mesh(
@@ -628,15 +637,10 @@ def load_mesh(mesh=None, periodic=False):
         interior_boundary_edges=interior_boundary_edges,
         exterior_boundary_edges=exterior_boundary_edges,
         inlet_edges=inlet_edges,
-        outlet_edges=outlet_edges
+        outlet_edges=outlet_edges,
+        periodic_map=periodic_map
     )
     
-    if periodic:
-        # Create periodic map, mapping masters and slaves
-        x_map = find_periodic_pairs(nodes, axis=0)
-        y_map = find_periodic_pairs(nodes, axis=1)
-        mesh.periodic_map = {**x_map, **y_map}
-
     return mesh
 
 
@@ -677,6 +681,7 @@ if __name__ == "__main__":
     
     """
     mesh_file = "square_hole.msh"
+    periodic = True
     geometry_length=0.1
     inner_radius = geometry_length * 0.2
     mesh_size = 0.5 * geometry_length
@@ -684,11 +689,11 @@ if __name__ == "__main__":
     total_start = datetime.now()
 
     print("Creating mesh...", end="", flush=True)
-    create_mesh(geometry_length, mesh_size, inner_radius, output_file=mesh_file)
+    create_mesh(geometry_length, mesh_size, inner_radius, output_file=mesh_file, periodic=periodic)
     
     print("Loading mesh...", end="", flush=True)
     raw_mesh = meshio.read(mesh_file)
-    mesh = load_mesh(raw_mesh)
+    mesh = load_mesh(raw_mesh, periodic=periodic)
     
     print("Checking mesh quality...", end="", flush=True)
     mesh.check_mesh_quality()

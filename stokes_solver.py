@@ -17,7 +17,7 @@ import matplotlib.tri as mtri
 
 import scipy.sparse as sp
 
-from tiled_mesher import create_mesh, load_mesh
+from mesher import create_mesh, load_mesh
 from datetime import datetime
 
 import pypardiso
@@ -90,7 +90,7 @@ class Simulation:
        Estimates average permeability using average velocity and known body force.
    """
    
-    def __init__(self, mesh, f, geometry_length, inner_radius, geometry_height, mu=0.001, rho=1000.0, bc_type="periodic"):
+    def __init__(self, mesh, f, geometry_length, inner_radius, geometry_height, mu=0.001, rho=1000.0, periodic_bc=False):
         self.mesh = mesh
         self.f = f
         self.mu = mu
@@ -98,7 +98,7 @@ class Simulation:
         self.geometry_length= geometry_length
         self.geometry_height = geometry_height
         self.inner_radius = inner_radius
-        self.bc_type = bc_type
+        self.periodic_bc = periodic_bc
         
         self.u1 = None
         self.u2 = None
@@ -134,9 +134,9 @@ class Simulation:
         triangles = self.mesh.triangles # P2 elements (6 nodes per triangle)
         pressure_nodes = self.mesh.pressure_nodes # P1 nodes (vertices)
         
-        if self.bc_type == "periodic":
+        if self.periodic_bc:
             periodic_map = self.mesh.periodic_map # Dictionary mapping slave_node_idx -> master_node_idx
-        elif self.bc_type == "inflow-outflow":
+        else:
             periodic_map = {} 
         
         print("\rAssembling matrices...", end="", flush=True)
@@ -144,13 +144,14 @@ class Simulation:
         
         # Coefficient for the drag term (from - (8*mu/H^2)*v )
         alpha = (8*self.mu) / (self.geometry_height **2)
+        epsilon = (1/14)
         
         M = MassAssembler2D(nodes, triangles, periodic_map)
         A = StiffnessAssembler2D(nodes, triangles, periodic_map) 
         B1, B2 = DivergenceAssembler2D(nodes, triangles, pressure_nodes, self.mesh.pressure_index_map, periodic_map)
         b1, b2 = LoadAssembler2D(nodes, triangles, self.f, periodic_map)
         
-        A11 = (self.mu * A) + (alpha * M)
+        A11 = (A * self.mu  ) + (alpha * M)
 
         end_matrices = datetime.now()
         print(f"\rAssembled matrices in {(end_matrices - start_matrices).total_seconds():.3f} seconds.")
@@ -184,9 +185,9 @@ class Simulation:
         print("Handling BC's and cleaning up...", end="", flush=True)
 
         # Apply other boundary conditions AFTER enforcing periodicity constraints
-        if self.bc_type == "periodic":
+        if self.periodic_bc:
             self.apply_periodic_bc()
-        elif self.bc_type == "inflow-outflow":
+        else:
             self.apply_inflow_outflow_bc()     
             
         # Convert to scr for faster solve.
@@ -222,7 +223,7 @@ class Simulation:
         self.u1 = sol[:n]
         self.u2 = sol[n:2*n]
         self.p = sol[2*n:]
-        
+
 
     def run(self):
         total_start = datetime.now()
@@ -272,7 +273,6 @@ class Simulation:
         lhs = self.lhs.tolil()  # Faster for row operations
         rhs = self.rhs
         
-        
         # Enforce periodicity (slave-master)
         self.slave_nodes = np.array(list(self.mesh.periodic_map.keys()))
         self.master_nodes = np.array([self.mesh.periodic_map[node] for node in self.slave_nodes])
@@ -286,7 +286,6 @@ class Simulation:
             self.lhs.data[s] = [1.0, -1.0]
             self.rhs[s] = 0.0
         
-
         # --- u2 (y-velocity) DOFs ---
         slave_dof_u2 = self.slave_nodes + n
         master_dof_u2 = self.master_nodes + n
@@ -294,107 +293,81 @@ class Simulation:
             self.lhs.rows[s] = [s, m]
             self.lhs.data[s] = [1.0, -1.0]
             self.rhs[s] = 0.0
-        
+            
+        # --- Pressure DOFs (P1 nodes) ---
+        offset = 2 * n
+        for slave_node, master_node in self.mesh.periodic_map.items():
+            # Only apply periodic constraint if both nodes are pressure nodes
+            if slave_node in self.mesh.pressure_index_map and master_node in self.mesh.pressure_index_map:
+                slave_dof = offset + self.mesh.pressure_index_map[slave_node]
+                master_dof = offset + self.mesh.pressure_index_map[master_node]
+                self.lhs.rows[slave_dof] = [slave_dof, master_dof]
+                self.lhs.data[slave_dof] = [1.0, -1.0]
+                self.rhs[slave_dof] = 0.0
     
-        # --- Collect all unique boundary nodes ---
+        # --- Set no-slip on interior boundary wall ---
         boundary_nodes = np.unique(np.array(self.mesh.interior_boundary_edges).flatten())
-    
-        # Create velocity DOFs: u1 (x) and u2 (y)
         boundary_dofs_u1 = boundary_nodes
         boundary_dofs_u2 = boundary_nodes + n
         all_boundary_dofs = np.concatenate([boundary_dofs_u1, boundary_dofs_u2])
     
-        # Zeroing of boundary rows and setting diagonal
         for dof in all_boundary_dofs:
-            lhs.rows[dof] = [dof]
-            lhs.data[dof] = [1.0]
-            rhs[dof] = 0.0
-    
+            apply_dirichlet_bc(lhs, rhs, dof, 0.0)
+            
+
         # --- Fix pressure at one arbitrary node ---
-        target_y = 0 * np.max(self.mesh.nodes[:, 1])
+        target_y = 1 * np.max(self.mesh.nodes[:, 1])
         target_x = 0.5 * np.max(self.mesh.nodes[:, 0])
-        anchor_node = min(
-            self.mesh.pressure_nodes,
-            key=lambda idx: (self.mesh.nodes[idx][1] - target_y)**2 + (self.mesh.nodes[idx][0] - target_x)**2
-        )
-    
+
+        slave_pressure_nodes = set(self.mesh.periodic_map.keys()) & set(self.mesh.pressure_index_map.keys())
+        candidates = [idx for idx in self.mesh.pressure_nodes if idx not in slave_pressure_nodes]
+        
+        if not candidates:
+            raise RuntimeError("No valid (non-slave) pressure nodes available for anchoring.")
+        
+        anchor_node = min(candidates, key=lambda idx: (self.mesh.nodes[idx][1] - target_y)**2 + (self.mesh.nodes[idx][0] - target_x)**2)
+
         print("\rAnchoring using node: ", anchor_node, ".    ")
     
         pressure_dof_local = self.mesh.pressure_index_map[anchor_node]
-        anchor_dof_global = 2 * n + pressure_dof_local
-    
-        lhs[anchor_dof_global, :] = 0.0
-        lhs[anchor_dof_global, anchor_dof_global] = 1.0
-        rhs[anchor_dof_global] = 0.0
+        anchor_dof = 2 * n + pressure_dof_local
+        apply_dirichlet_bc(lhs, rhs, anchor_dof, 0.0)
     
     
     def apply_inflow_outflow_bc(self):
         """
         Applies:
-        - No-slip condition on wall nodes
-        - Prescribed velocity on inflow (Dirichlet)
-        - Do-nothing (natural) condition on outflow
+        - No-slip condition on wall nodes (Dirichlet)
+        - Do-nothing condition on inlet and outlet (natural BC)
         - Pressure anchoring at one point
         """
         n = self.mesh.nodes.shape[0]
         lhs = self.lhs.tolil()
         rhs = self.rhs
     
-        # Extract unique node indices from classified edge sets
-        inlet_nodes = np.unique(np.array(self.mesh.inlet_edges).flatten())
-        wall_nodes = np.unique(np.array(self.mesh.wall_edges).flatten())        
+        # --- No-slip on wall nodes ---
+        wall_nodes = np.unique(np.array(self.mesh.wall_edges).flatten())
     
-        no_slip_nodes = np.unique(np.concatenate([wall_nodes]))
-    
-        # 1. --- Apply no-slip on walls (symmetric enforcement) ---
-        for node in no_slip_nodes:
+        for node in wall_nodes:
             for comp in [0, 1]:  # u1, u2
                 dof = node + comp * n
-                lhs[dof, :] = 0.0
-                lhs[:, dof] = 0.0
-                lhs[dof, dof] = 1.0
-                rhs[dof] = 0.0
-    
-        # 2. --- Apply prescribed inflow velocity (symmetric enforcement) ---
-        for node in inlet_nodes:
-            x, y = self.mesh.nodes[node][:2]
-            vx, vy = self.inflow_velocity_profile(x, y)
-    
-            for comp, val in zip([0, 1], [vx, vy]):
-                dof = node + comp * n
-                lhs[dof, :] = 0.0
-                lhs[:, dof] = 0.0
-                lhs[dof, dof] = 1.0
-                rhs[dof] = val
-    
-        # 3. --- Do-nothing on outlet ---
-        # Natural BCs are already handled in the weak form
-    
-        # 4. --- Fix pressure at one interior point (symmetric enforcement) ---
-        target_y = 0.1 * np.max(self.mesh.nodes[:, 1])
+                apply_dirichlet_bc(lhs, rhs, dof, 0.0)
+                
+        # Do nothing on inlet
+                
+        # --- Fix pressure at one arbitrary node ---
+        target_y = 1 * np.max(self.mesh.nodes[:, 1])
         target_x = 0.5 * np.max(self.mesh.nodes[:, 0])
         anchor_node = min(
             self.mesh.pressure_nodes,
             key=lambda idx: (self.mesh.nodes[idx][1] - target_y)**2 + (self.mesh.nodes[idx][0] - target_x)**2
         )
-    
+        
+        print("\rAnchoring using node: ", anchor_node, ".    ")
+        
         pressure_dof_local = self.mesh.pressure_index_map[anchor_node]
-        anchor_dof_global = 2 * n + pressure_dof_local
-        lhs[anchor_dof_global, :] = 0.0
-        lhs[:, anchor_dof_global] = 0.0
-        lhs[anchor_dof_global, anchor_dof_global] = 1.0
-        rhs[anchor_dof_global] = 0.0
-    
-        print(f"Inflow BC applied at {len(inlet_nodes)} nodes.")
-        print(f"Anchoring pressure at node {anchor_node}.")
-
-        
-        
-    def inflow_velocity_profile(self, x, y):
-        """
-        Returns the inflow velocity at (x, y).
-        """
-        return (0.0, 0.0)  # Uniform downward flow, for example
+        anchor_dof = 2 * n + pressure_dof_local 
+        apply_dirichlet_bc(lhs, rhs, anchor_dof, 0.0)
 
 
     def debug_system(self, tol=1e-12):
@@ -512,8 +485,9 @@ class Simulation:
         f_magnitude = abs(self.f(0, 0)[1])  # Assume vertical force only
     
         # Darcy's law with parabolic correction
-        k = (2 / 3) * self.mu * abs(avg_v) / f_magnitude
-    
+        epsilon = 1/14
+        k = (2 / 3) * self.mu * abs(avg_v) / (f_magnitude)
+
         avg_velocity = float(f"{avg_v:.4e}")
         self.permeability = float(f"{k:.4e}")
     
@@ -521,6 +495,12 @@ class Simulation:
         print(f"Permeability:     {self.permeability} m²")
         return self.permeability
 
+
+def apply_dirichlet_bc(lhs, rhs, dof, value):
+    lhs[dof, :] = 0.0
+    lhs[:, dof] = 0.0
+    lhs[dof, dof] = 1.0
+    rhs[dof] = value
 
 def canonical_dof(node, periodic_map):
     """Redirects node to its periodic master if needed."""
@@ -812,7 +792,9 @@ def DivergenceAssembler2D(nodes, triangles, pressure_nodes, pressure_index_map, 
     for tri in triangles:
         B1_local, B2_local = localDivergenceMatrix2D(nodes, tri)
         for i in range(3):  # Only first 3 nodes of each triangle are vertex nodes (P1)
-            p_idx = pressure_index_map[tri[i]]
+            canonical_p_node = canonical_dof(tri[i], periodic_map)
+            p_idx = pressure_index_map[canonical_p_node]            
+            
             for j in range(6):
                 v_indx = canonical_dof(tri[j], periodic_map)
                 B1[p_idx, v_indx] += B1_local[i, j]
@@ -1047,13 +1029,13 @@ if __name__ == "__main__":
     
     # Define constants
     geometry_length = 0.001 # meters 0.001 is 1mm
-    mesh_size = geometry_length * 0.015 # meters
+    mesh_size = geometry_length * 0.025 # meters
     inner_radius = geometry_length * 0.40
     geometry_height = 0.000091 # 91 micrometer thickness
     mu = 0.00089 # Viscosity Pa*s
     rho = 1000.0 # Density kg/m^3
     
-    periodic = False
+    periodic = True
     
     # Body forces
     def f(x, y):
@@ -1061,8 +1043,8 @@ if __name__ == "__main__":
 
     # Create mesh
     mesh_start = datetime.now()
-    create_mesh(3,4,geometry_length, mesh_size, inner_radius, "square_with_hole.msh", periodic=periodic)
-    #create_mesh(geometry_length, mesh_size, inner_radius, "square_with_hole.msh", periodic=periodic)
+    #create_mesh(3,4,geometry_length, mesh_size, inner_radius, "square_with_hole.msh", periodic=periodic)
+    create_mesh(geometry_length, mesh_size, inner_radius, "square_with_hole.msh", periodic=periodic)
     mesh_time = datetime.now()
     print(f"Created mesh in in {(mesh_time - mesh_start).total_seconds():.3f} seconds.")
 
@@ -1078,7 +1060,7 @@ if __name__ == "__main__":
     print(f"Checked mesh in {(check_time - load_time).total_seconds():.3f} seconds.")
 
     # Setup and run simulation
-    sim = Simulation(mesh, f, geometry_length, inner_radius, geometry_height, mu=mu, rho=rho, bc_type="inflow-outflow") #"periodic"
+    sim = Simulation(mesh, f, geometry_length, inner_radius, geometry_height, mu=mu, rho=rho, periodic_bc=periodic) #"periodic"
     print(f"Simulation parameters: {sim.get_description()}")
     sim.run()
     
