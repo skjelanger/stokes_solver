@@ -143,8 +143,7 @@ class Simulation:
         start_matrices = datetime.now()
         
         # Coefficient for the drag term (from - (8*mu/H^2)*v )
-        alpha = (8*self.mu) / (self.geometry_height **2)
-        epsilon = (1/14)
+        alpha = (12*self.mu) / (self.geometry_height **2)
         
         M = MassAssembler2D(nodes, triangles, periodic_map)
         A = StiffnessAssembler2D(nodes, triangles, periodic_map) 
@@ -314,9 +313,8 @@ class Simulation:
         for dof in all_boundary_dofs:
             apply_dirichlet_bc(lhs, rhs, dof, 0.0)
             
-
         # --- Fix pressure at one arbitrary node ---
-        target_y = 1 * np.max(self.mesh.nodes[:, 1])
+        target_y = 0 * np.max(self.mesh.nodes[:, 1])
         target_x = 0.5 * np.max(self.mesh.nodes[:, 0])
 
         slave_pressure_nodes = set(self.mesh.periodic_map.keys()) & set(self.mesh.pressure_index_map.keys())
@@ -337,37 +335,40 @@ class Simulation:
     def apply_inflow_outflow_bc(self):
         """
         Applies:
-        - No-slip condition on wall nodes (Dirichlet)
-        - Do-nothing condition on inlet and outlet (natural BC)
-        - Pressure anchoring at one point
+        - No-slip condition on wall nodes (Dirichlet on velocity)
+        - Dirichlet pressure BCs: high pressure at inlet, low at outlet
         """
         n = self.mesh.nodes.shape[0]
         lhs = self.lhs.tolil()
         rhs = self.rhs
+        
+        wall_nodes = np.unique(np.array(self.mesh.wall_edges).flatten())
+        inlet_nodes = np.unique(np.array(self.mesh.inlet_edges).flatten())
+        outlet_nodes = np.unique(np.array(self.mesh.outlet_edges).flatten())
+        
+        inlet_corner_nodes = np.intersect1d(inlet_nodes, wall_nodes)
+        outlet_corner_nodes = np.intersect1d(outlet_nodes, wall_nodes)
+        conflicting_nodes = np.union1d(inlet_corner_nodes, outlet_corner_nodes)
+        
+        outlet_nodes = np.setdiff1d(outlet_nodes, conflicting_nodes)
+        inlet_nodes = np.setdiff1d(inlet_nodes, conflicting_nodes)
     
         # --- No-slip on wall nodes ---
-        wall_nodes = np.unique(np.array(self.mesh.wall_edges).flatten())
-    
         for node in wall_nodes:
             for comp in [0, 1]:  # u1, u2
                 dof = node + comp * n
                 apply_dirichlet_bc(lhs, rhs, dof, 0.0)
-                
-        # Do nothing on inlet
-                
-        # --- Fix pressure at one arbitrary node ---
-        target_y = 1 * np.max(self.mesh.nodes[:, 1])
+    
+        # --- Dirichlet pressure at outlet ---
+        target_y = 0 * np.max(self.mesh.nodes[:, 1])
         target_x = 0.5 * np.max(self.mesh.nodes[:, 0])
-        anchor_node = min(
-            self.mesh.pressure_nodes,
-            key=lambda idx: (self.mesh.nodes[idx][1] - target_y)**2 + (self.mesh.nodes[idx][0] - target_x)**2
-        )
         
-        print("\rAnchoring using node: ", anchor_node, ".    ")
-        
-        pressure_dof_local = self.mesh.pressure_index_map[anchor_node]
-        anchor_dof = 2 * n + pressure_dof_local 
-        apply_dirichlet_bc(lhs, rhs, anchor_dof, 0.0)
+        outlet_pressure_nodes = [i for i in outlet_nodes if i in self.mesh.pressure_index_map]
+        if not outlet_pressure_nodes:
+            raise RuntimeError("No pressure nodes found on outlet.")
+        outlet_node = min(outlet_pressure_nodes, key=lambda idx: (self.mesh.nodes[idx][1] - target_y)**2 + (self.mesh.nodes[idx][0] - target_x)**2)
+        pressure_dof_local = self.mesh.pressure_index_map[outlet_node]
+        apply_dirichlet_bc(lhs, rhs, 2 * n + pressure_dof_local, 0)
 
 
     def debug_system(self, tol=1e-12):
@@ -653,11 +654,23 @@ def localStiffnessMatrix2D(nodes, triangle):
     
     # Quadrature points and weights in barycentric coordinates
     bary_coords = np.array([
-        [1/2, 1/2, 0],
-        [0, 1/2, 1/2],
-        [1/2, 0, 1/2]
+        [1/3, 1/3, 1/3],
+        [0.0597158717, 0.4701420641, 0.4701420641],
+        [0.4701420641, 0.0597158717, 0.4701420641],
+        [0.4701420641, 0.4701420641, 0.0597158717],
+        [0.7974269853, 0.1012865073, 0.1012865073],
+        [0.1012865073, 0.7974269853, 0.1012865073],
+        [0.1012865073, 0.1012865073, 0.7974269853],
     ])
-    weights = np.array([1/3, 1/3, 1/3])
+    weights = np.array([
+        0.225,
+        0.1323941527,
+        0.1323941527,
+        0.1323941527,
+        0.1259391805,
+        0.1259391805,
+        0.1259391805,
+    ])
 
     # Build affine map from reference triangle to real triangle (vertices only)
     J = np.column_stack((v1 - v0, v2 - v0))  # Jacobian
@@ -836,11 +849,23 @@ def localDivergenceMatrix2D(nodes, triangle):
 
     # Quadrature points (same as in stiffness matrix)
     bary_coords = np.array([
-        [1/2, 1/2, 0],
-        [0, 1/2, 1/2],
-        [1/2, 0, 1/2]
+        [1/3, 1/3, 1/3],
+        [0.0597158717, 0.4701420641, 0.4701420641],
+        [0.4701420641, 0.0597158717, 0.4701420641],
+        [0.4701420641, 0.4701420641, 0.0597158717],
+        [0.7974269853, 0.1012865073, 0.1012865073],
+        [0.1012865073, 0.7974269853, 0.1012865073],
+        [0.1012865073, 0.1012865073, 0.7974269853],
     ])
-    weights = np.array([1/3, 1/3, 1/3])
+    weights = np.array([
+        0.225,
+        0.1323941527,
+        0.1323941527,
+        0.1323941527,
+        0.1259391805,
+        0.1259391805,
+        0.1259391805,
+    ])
     
     B1_local = np.zeros((3, 6))
     B2_local = np.zeros((3, 6))
@@ -1030,7 +1055,7 @@ if __name__ == "__main__":
     # Define constants
     geometry_length = 0.001 # meters 0.001 is 1mm
     mesh_size = geometry_length * 0.025 # meters
-    inner_radius = geometry_length * 0.40
+    inner_radius = geometry_length * 0.45
     geometry_height = 0.000091 # 91 micrometer thickness
     mu = 0.00089 # Viscosity Pa*s
     rho = 1000.0 # Density kg/m^3
