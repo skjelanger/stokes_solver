@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
 
 import scipy.sparse as sp
+from scipy.spatial import cKDTree
 
 from mesher import create_mesh, load_mesh
 from datetime import datetime
@@ -112,12 +113,10 @@ class Simulation:
             desc += f"mu={self.mu:.2e}"
         if self.rho is not None:
             desc += f", rho={self.rho:.2e}"
-        if self.mesh.mesh_size is not None:
-            desc += f", h={self.mesh.mesh_size:.2e}"
         if self.mesh.triangles is not None:
-            desc += f", n={self.mesh.triangles.shape[0]}"
+            desc += f", N={self.mesh.triangles.shape[0]}"
         if self.geometry_height is not None:
-            desc += f", t={self.geometry_height:.2e}"
+            desc += f", h={self.geometry_height:.2e}"
         if self.inner_radius is not None:
             desc += f", r={self.inner_radius:.2e}"
             
@@ -143,14 +142,14 @@ class Simulation:
         start_matrices = datetime.now()
         
         # Coefficient for the drag term (from - (8*mu/H^2)*v )
-        alpha = (12*self.mu) / (self.geometry_height **2)
+        alpha = (8*self.mu ) / (self.geometry_height **2)
         
         M = MassAssembler2D(nodes, triangles, periodic_map)
         A = StiffnessAssembler2D(nodes, triangles, periodic_map) 
         B1, B2 = DivergenceAssembler2D(nodes, triangles, pressure_nodes, self.mesh.pressure_index_map, periodic_map)
         b1, b2 = LoadAssembler2D(nodes, triangles, self.f, periodic_map)
         
-        A11 = (A * self.mu  ) + (alpha * M)
+        A11 = (A * self.mu ) + (alpha * M)
 
         end_matrices = datetime.now()
         print(f"\rAssembled matrices in {(end_matrices - start_matrices).total_seconds():.3f} seconds.")
@@ -421,11 +420,11 @@ class Simulation:
     
         triangles = self.mesh.triangles
         nodes = self.mesh.nodes[:, :2]  # Drop z
-        u = self.u2  # vertical velocity
     
         total_flow = 0.0
         total_area = 0.0
-    
+        u_max = 0.0
+
         # Barycentric quadrature points (xi, eta) and weights
         quad_points = np.array([
             [1/3, 1/3, 1/3],
@@ -451,15 +450,18 @@ class Simulation:
             v0, v1, v2 = coords[:3]
             J = np.column_stack((v1 - v0, v2 - v0))
             area = abs(np.linalg.det(J)) / 2
-         
-            u_tri = u[tri]
+            
+            u2_tri = self.u2[tri]
+            
             for (L1, L2, L3), w in zip(quad_points, weights):
                 xi, eta = L2, L3
                 # Evaluate shape functions at quadrature point
                 N = np.array([P2_basis(i, xi, eta) for i in range(6)])
-                u_val = N @ u_tri
-                total_flow += u_val * w * area
-            
+                u2_val = N @ u2_tri
+                total_flow += u2_val * w * area
+                
+                u_max = max(u_max, abs(u2_val))
+                            
             total_area += area
     
         # Check consistency of calculated total area with expected geometry area
@@ -482,19 +484,14 @@ class Simulation:
         if total_area < 1e-9: # Avoid division by zero
             warnings.warn("Total domain area is very small or zero. Permeability calculation might be unreliable.")
             
-        avg_v = total_flow / total_area
-        f_magnitude = abs(self.f(0, 0)[1])  # Assume vertical force only
-    
-        # Darcy's law with parabolic correction
-        epsilon = 1/14
-        k = (2 / 3) * self.mu * abs(avg_v) / (f_magnitude)
-
-        avg_velocity = float(f"{avg_v:.4e}")
-        self.permeability = float(f"{k:.4e}")
-    
-        print(f"Avg velocity:     {avg_velocity} m/s")
-        print(f"Permeability:     {self.permeability} m²")
-        return self.permeability
+        self.avg_v = (2/3) * total_flow / total_area
+        self.k= self.mu * abs(self.avg_v) 
+        self.u_max = u_max
+        
+        print(f"Avg y-velocity:     {self.avg_v} m/s")
+        print(f"Maximum y-velocity:     {self.u_max} m/s")
+        print(f"Permeability:     {self.k} m²")
+        return self.k
 
 
 def apply_dirichlet_bc(lhs, rhs, dof, value):
@@ -905,8 +902,8 @@ def plot_velocity_magnitude(mesh, u1, u2, title_suffix=""):
     plt.close()
     
     # --- NEW: Print some useful statistics ---
-    print(f"\rMax velocity magnitude: {np.max(magnitude):.3e} m/s")
-    print(f"Min velocity magnitude: {np.min(magnitude):.3e} m/s")
+    print(f"\rMax node velocity magnitude: {np.max(magnitude):.3e} m/s")
+    print(f"Min node velocity magnitude: {np.min(magnitude):.3e} m/s")
 
     return magnitude
     
@@ -942,34 +939,61 @@ def plot_pressure(mesh, pressure, title_suffix=""):
     print(f"Min pressure: {np.min(pressure):.4e} Pa")
     return
 
-def plot_velocity_vectors(mesh, u1, u2, title_suffix=""):
+def plot_velocity_vectors(mesh, u1, u2, title_suffix="", max_distance=0.05):
+    """
+    Plot velocity vectors at uniformly spaced points, excluding ones too far from the mesh.
+
+    Parameters:
+    -----------
+    max_distance : float
+        Maximum allowed distance (in mm) from a grid point to a mesh node. 
+        Grid points farther than this are ignored.
+    """
     x = mesh.nodes[:, 0] * 1000  # mm
     y = mesh.nodes[:, 1] * 1000
     u = u1
     v = u2
-
     magnitude = np.sqrt(u**2 + v**2)
-    N = min(1000, len(u))  # Number of vectors to show
-    idx = np.random.choice(len(u), size=N, replace=False)
 
-    # Normalize vectors for uniform length
+    # Build spatial index
+    kdtree = cKDTree(np.column_stack([x, y]))
+
+    # Create uniform grid
+    nx, ny = 30, 30
+    x_grid = np.linspace(np.min(x), np.max(x), nx)
+    y_grid = np.linspace(np.min(y), np.max(y), ny)
+    xv, yv = np.meshgrid(x_grid, y_grid)
+    grid_points = np.column_stack([xv.ravel(), yv.ravel()])
+
+    # Find closest mesh node and distance
+    distances, idx = kdtree.query(grid_points)
+    mask = distances < max_distance  # Only accept nearby nodes
+
+    # Filter valid indices
+    idx = idx[mask]
+    idx = np.unique(idx)
+
+    # Normalize velocity direction
     u_dir = np.zeros_like(u)
     v_dir = np.zeros_like(v)
     nonzero = magnitude > 1e-14
     u_dir[nonzero] = u[nonzero] / magnitude[nonzero]
     v_dir[nonzero] = v[nonzero] / magnitude[nonzero]
 
+    # Plot
     plt.figure(figsize=(6, 5), dpi=300)
     quiv = plt.quiver(
         x[idx], y[idx],
         u_dir[idx], v_dir[idx],
-        magnitude[idx],            # Still color by original magnitude
-        angles='xy',     # scale controls arrow length
-        scale_units='xy', cmap='viridis'
+        magnitude[idx],
+        angles='xy',
+        scale_units='xy',
+        cmap='viridis',
+        scale=34
     )
 
     plt.colorbar(quiv, label='Velocity Magnitude [m/s]')
-    plt.title(f"Velocity Direction (colored by magnitude)\n{title_suffix}\n ", fontsize=10)
+    plt.title(f"Velocity Direction (colored by magnitude)\n{title_suffix}\n", fontsize=10)
     plt.xlabel("x [mm]")
     plt.ylabel("y [mm]")
     plt.gca().set_aspect("equal")
@@ -1054,8 +1078,8 @@ if __name__ == "__main__":
     
     # Define constants
     geometry_length = 0.001 # meters 0.001 is 1mm
-    mesh_size = geometry_length * 0.025 # meters
-    inner_radius = geometry_length * 0.45
+    mesh_size = geometry_length * 0.01 # meters
+    inner_radius = geometry_length * 0.4
     geometry_height = 0.000091 # 91 micrometer thickness
     mu = 0.00089 # Viscosity Pa*s
     rho = 1000.0 # Density kg/m^3
