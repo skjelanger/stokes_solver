@@ -144,11 +144,13 @@ class Simulation:
         # Coefficient for the drag term (from - (8*mu/H^2)*v )
         alpha = (8*self.mu ) / (self.geometry_height **2)
         
+        # Assemble matrices
         M = MassAssembler2D(nodes, triangles, periodic_map)
         A = StiffnessAssembler2D(nodes, triangles, periodic_map) 
         B1, B2 = DivergenceAssembler2D(nodes, triangles, pressure_nodes, self.mesh.pressure_index_map, periodic_map)
         b1, b2 = LoadAssembler2D(nodes, triangles, self.f, periodic_map)
         
+        # Combine mass ad stiffness matrix,
         A11 = (A * self.mu ) + (alpha * M)
 
         end_matrices = datetime.now()
@@ -413,20 +415,15 @@ class Simulation:
         print(f"Matrix sparsity: {100*nnz/total:.2e}% nonzero entries.")
         print("--- End Debug Info ---")
 
-
     def calculate_permeability(self, direction='y'):
-        if direction != 'y':
-            raise NotImplementedError("Only vertical permeability (y-direction) is currently supported.")
-    
+        nodes = self.mesh.nodes[:, :2]
         triangles = self.mesh.triangles
-        nodes = self.mesh.nodes[:, :2]  # Drop z
+        u2 = self.u2
     
-        total_flow = 0.0
-        total_area = 0.0
-        u_max = 0.0
-
-        # Barycentric quadrature points (xi, eta) and weights
-        quad_points = np.array([
+        area_weighted_velocity = 0.0
+    
+        # Quadrature: Barycentric coordinates and weights for 7-point integration
+        bary_coords = np.array([
             [1/3, 1/3, 1/3],
             [0.0597158717, 0.4701420641, 0.4701420641],
             [0.4701420641, 0.0597158717, 0.4701420641],
@@ -444,55 +441,33 @@ class Simulation:
             0.1259391805,
             0.1259391805,
         ])
-         
+    
         for tri in triangles:
-            coords = nodes[tri][:, :2]
+            coords = nodes[tri]
             v0, v1, v2 = coords[:3]
             J = np.column_stack((v1 - v0, v2 - v0))
-            area = abs(np.linalg.det(J)) / 2
+            triangle_area = abs(np.linalg.det(J)) / 2
+            u2_local = u2[tri]
             
-            u2_tri = self.u2[tri]
+            triangle_velocity = 0.0
             
-            for (L1, L2, L3), w in zip(quad_points, weights):
-                xi, eta = L2, L3
-                # Evaluate shape functions at quadrature point
+            # Use quadrature for evaluating average velocity of triangle.
+            for bary, weight in zip(bary_coords, weights):
+                xi, eta = bary[1], bary[2]
                 N = np.array([P2_basis(i, xi, eta) for i in range(6)])
-                u2_val = N @ u2_tri
-                total_flow += u2_val * w * area
-                
-                u_max = max(u_max, abs(u2_val))
-                            
-            total_area += area
+                u2_at_point = N @ u2_local
     
-        # Check consistency of calculated total area with expected geometry area
-        # (This is a sanity check for the mesh reading and area calculation)
-        if hasattr(self, 'geometry_length') and hasattr(self, 'inner_radius'):
-            if self.inner_radius:
-                print("Assuming square domain with hole.")
-                expected_domain_area = (self.geometry_length ** 2) - np.pi * (self.inner_radius ** 2) # Assuming square with circular hole
-            else:
-                print("Assuming square domain.")
-                expected_domain_area = (self.geometry_length ** 2) 
-            
-            rel_area_dev = abs(total_area - expected_domain_area) / expected_domain_area if expected_domain_area > 1e-9 else 0
-            print(f"Calculated total domain area: {total_area:.4e} m^2")
-            print(f"Expected domain area: {expected_domain_area:.4e} m^2 (Rel. dev: {rel_area_dev:.3g})")
-            
-        else:
-            print(f"Calculated total domain area: {total_area:.4e} m^2 (Expected area not computed).")
-
-        if total_area < 1e-9: # Avoid division by zero
-            warnings.warn("Total domain area is very small or zero. Permeability calculation might be unreliable.")
-            
-        self.avg_v = (2/3) * total_flow / total_area
-        self.k= self.mu * abs(self.avg_v) 
-        self.u_max = u_max
+                triangle_velocity += u2_at_point * weight * triangle_area
+    
+            area_weighted_velocity += triangle_velocity
+    
+        self.avg_velocity = area_weighted_velocity 
+        self.k = (2 / 3) * (0.001**2) * abs(self.avg_velocity)
+    
+        print(f"Avg y-velocity: {self.avg_velocity:.4e} m/s")
+        print(f"Permeability: {self.k:.4e} m²")
         
-        print(f"Avg y-velocity:     {self.avg_v} m/s")
-        print(f"Maximum y-velocity:     {self.u_max} m/s")
-        print(f"Permeability:     {self.k} m²")
         return self.k
-
 
 def apply_dirichlet_bc(lhs, rhs, dof, value):
     lhs[dof, :] = 0.0
@@ -939,7 +914,7 @@ def plot_pressure(mesh, pressure, title_suffix=""):
     print(f"Min pressure: {np.min(pressure):.4e} Pa")
     return
 
-def plot_velocity_vectors(mesh, u1, u2, title_suffix="", max_distance=0.05):
+def plot_velocity_vectors(mesh, u1, u2, title_suffix=""):
     """
     Plot velocity vectors at uniformly spaced points, excluding ones too far from the mesh.
 
@@ -967,10 +942,8 @@ def plot_velocity_vectors(mesh, u1, u2, title_suffix="", max_distance=0.05):
 
     # Find closest mesh node and distance
     distances, idx = kdtree.query(grid_points)
-    mask = distances < max_distance  # Only accept nearby nodes
 
     # Filter valid indices
-    idx = idx[mask]
     idx = np.unique(idx)
 
     # Normalize velocity direction
@@ -988,8 +961,7 @@ def plot_velocity_vectors(mesh, u1, u2, title_suffix="", max_distance=0.05):
         magnitude[idx],
         angles='xy',
         scale_units='xy',
-        cmap='viridis',
-        scale=34
+        cmap='viridis'
     )
 
     plt.colorbar(quiv, label='Velocity Magnitude [m/s]')
@@ -1003,7 +975,6 @@ def plot_velocity_vectors(mesh, u1, u2, title_suffix="", max_distance=0.05):
     plt.savefig(f"plots/velocity_vectors_colored_{safe_desc}.png", dpi=300)
     plt.show()
     plt.close()
-
     
 def load_simulation(filename):
     """
@@ -1077,12 +1048,12 @@ if __name__ == "__main__":
     os.makedirs("simulations", exist_ok=True)
     
     # Define constants
-    geometry_length = 0.001 # meters 0.001 is 1mm
-    mesh_size = geometry_length * 0.01 # meters
-    inner_radius = geometry_length * 0.4
-    geometry_height = 0.000091 # 91 micrometer thickness
-    mu = 0.00089 # Viscosity Pa*s
-    rho = 1000.0 # Density kg/m^3
+    geometry_length = 1 # meters 0.001 is 1mm
+    mesh_size = geometry_length * 0.05 # meters
+    inner_radius = geometry_length * 0.40
+    geometry_height = 0.091 # 91 micrometer thickness
+    mu = 1# 0.00089 # Viscosity Pa*s
+    rho = 1# 1000.0 # Density kg/m^3
     
     periodic = True
     
