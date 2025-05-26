@@ -682,9 +682,9 @@ if __name__ == "__main__":
     """
     mesh_file = "square_hole.msh"
     periodic = True
-    geometry_length=0.1
-    inner_radius = geometry_length * 0.4
-    mesh_size = 0.1 * geometry_length
+    geometry_length=1
+    inner_radius = geometry_length * 0.49
+    mesh_size = 0.0016 * geometry_length
     
     total_start = datetime.now()
 
@@ -699,7 +699,7 @@ if __name__ == "__main__":
     mesh.check_mesh_quality()
 
     print("Plotting mesh...", end="", flush=True)
-    mesh.plot(show_node_ids=False, filename="mesh.png")
+    #mesh.plot(show_node_ids=False, filename="mesh.png")
     
     end_mesh = datetime.now()
     print(f"\rMeshed in {(end_mesh - total_start).total_seconds():.3f} seconds")
