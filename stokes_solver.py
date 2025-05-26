@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# stokes_solver.py
 """
 Created on Fri Apr  4 07:15:06 2025
 
@@ -15,13 +16,13 @@ import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
 
 import scipy.sparse as sp
+from scipy.spatial import cKDTree
 
 from mesher import create_mesh, load_mesh
 from datetime import datetime
 
 import pypardiso
 from numba import njit
-
 
 class Simulation:
     """
@@ -80,7 +81,7 @@ class Simulation:
    plot()
        Generates and saves plots of velocity magnitude, vectors, and pressure field.
 
-   apply_boundary_conditions()
+   apply_periodic_bc()
        Applies no-slip conditions on walls and anchors the pressure DOF.
 
    debug_system(tol=1e-12)
@@ -90,7 +91,7 @@ class Simulation:
        Estimates average permeability using average velocity and known body force.
    """
    
-    def __init__(self, mesh, f, geometry_length, inner_radius, geometry_height, mu=0.001, rho=1000.0, ):
+    def __init__(self, mesh, f, geometry_length, inner_radius, geometry_height, mu=0.001, rho=1000.0, periodic_bc=False):
         self.mesh = mesh
         self.f = f
         self.mu = mu
@@ -98,6 +99,7 @@ class Simulation:
         self.geometry_length= geometry_length
         self.geometry_height = geometry_height
         self.inner_radius = inner_radius
+        self.periodic_bc = periodic_bc
         
         self.u1 = None
         self.u2 = None
@@ -111,12 +113,10 @@ class Simulation:
             desc += f"mu={self.mu:.2e}"
         if self.rho is not None:
             desc += f", rho={self.rho:.2e}"
-        if self.mesh.mesh_size is not None:
-            desc += f", h={self.mesh.mesh_size:.2e}"
         if self.mesh.triangles is not None:
-            desc += f", n={self.mesh.triangles.shape[0]}"
+            desc += f", N={self.mesh.triangles.shape[0]}"
         if self.geometry_height is not None:
-            desc += f", t={self.geometry_height:.2e}"
+            desc += f", h={self.geometry_height:.2e}"
         if self.inner_radius is not None:
             desc += f", r={self.inner_radius:.2e}"
             
@@ -130,29 +130,36 @@ class Simulation:
 
     def assemble(self):
         nodes = self.mesh.nodes
-        triangles = self.mesh.triangles
-        pressure_nodes = self.mesh.pressure_nodes
-        periodic_map = self.mesh.periodic_map
+        triangles = self.mesh.triangles # P2 elements (6 nodes per triangle)
+        pressure_nodes = self.mesh.pressure_nodes # P1 nodes (vertices)
+        
+        if self.periodic_bc:
+            periodic_map = self.mesh.periodic_map # Dictionary mapping slave_node_idx -> master_node_idx
+        else:
+            periodic_map = {} 
         
         print("\rAssembling matrices...", end="", flush=True)
         start_matrices = datetime.now()
         
-        alpha = (8*self.mu) / (self.geometry_height ** 2)  # You may need to define geometry_height
+        # Coefficient for the drag term (from - (8*mu/H^2)*v )
+        alpha = (8*self.mu ) / (self.geometry_height **2)
         
+        # Assemble matrices
         M = MassAssembler2D(nodes, triangles, periodic_map)
         A = StiffnessAssembler2D(nodes, triangles, periodic_map) 
-        B1, B2 = DivergenceAssembler2D(nodes, triangles, pressure_nodes, periodic_map)
+        B1, B2 = DivergenceAssembler2D(nodes, triangles, pressure_nodes, self.mesh.pressure_index_map, periodic_map)
         b1, b2 = LoadAssembler2D(nodes, triangles, self.f, periodic_map)
         
-        A11 = self.mu * A + alpha * M
+        # Combine mass ad stiffness matrix,
+        A11 = (A * self.mu ) + (alpha * M)
 
         end_matrices = datetime.now()
         print(f"\rAssembled matrices in {(end_matrices - start_matrices).total_seconds():.3f} seconds.")
         
         print("Assembling full system...", end="", flush=True)
 
-        B1T = B1.T
-        B2T = B2.T
+        B1T = B1.T.tocsr()
+        B2T = B2.T.tocsr()
 
         n = A11.shape[0]
         m = len(self.mesh.pressure_nodes)
@@ -174,38 +181,15 @@ class Simulation:
         
         end_system = datetime.now()
         print(f"\rAssembled final system {(end_system - end_matrices).total_seconds():.3f} seconds.")
-        
-        # Enforce periodicity (slave-master)
-        print("Handling slaves...", end="", flush=True)
-        self.slave_nodes = np.array(list(self.mesh.periodic_map.keys()))
-        self.master_nodes = np.array([self.mesh.periodic_map[node] for node in self.slave_nodes])
-        n = self.mesh.nodes.shape[0]
-        
-        # --- u1 (x-velocity) DOFs ---
-        slave_dof_u1 = self.slave_nodes         
-        master_dof_u1 = self.master_nodes
-        for s, m in zip(slave_dof_u1, master_dof_u1):
-            self.lhs.rows[s] = [s, m]
-            self.lhs.data[s] = [1.0, -1.0]
-            self.rhs[s] = 0.0
-        
-
-        # --- u2 (y-velocity) DOFs ---
-        slave_dof_u2 = self.slave_nodes + n
-        master_dof_u2 = self.master_nodes + n
-        for s, m in zip(slave_dof_u2, master_dof_u2):
-            self.lhs.rows[s] = [s, m]
-            self.lhs.data[s] = [1.0, -1.0]
-            self.rhs[s] = 0.0
-        
-        end_slaves = datetime.now()
-        print(f"\rFixed slaves {(end_slaves - end_system).total_seconds():.3f} seconds.")
-        
+                
         print("Handling BC's and cleaning up...", end="", flush=True)
 
         # Apply other boundary conditions AFTER enforcing periodicity constraints
-        self.apply_boundary_conditions()    
-        
+        if self.periodic_bc:
+            self.apply_periodic_bc()
+        else:
+            self.apply_inflow_outflow_bc()     
+            
         # Convert to scr for faster solve.
         self.lhs = self.lhs.tocsr()
         
@@ -214,12 +198,11 @@ class Simulation:
         if len(empty_rows) > 0:
             warnings.warn(f"Empty rows in system matrix after boundary condition application: {empty_rows}")
             
-            
-        # clean up matrices
-        del A, M, B1, B2, B1T, B2T
-
-        end_BCs = datetime.now()
-        print(f"\rHandled BCs in {(end_BCs - end_slaves).total_seconds():.3f} seconds.")
+        end_bc = datetime.now()
+        print(f"\rHandled bc in {(end_bc - end_system).total_seconds():.3f} seconds.")
+        
+        # Clean up intermediate matrices to save memory
+        del A, M, B1, B2, B1T, B2T, A11
 
         
     def solve(self):
@@ -230,18 +213,17 @@ class Simulation:
         rhs_norm = np.linalg.norm(self.rhs)
         self.rel_res = self.res_norm / (rhs_norm + 1e-15)  # Avoid divide-by-zero
         
-        if rhs_norm < 1e-12:
-            warnings.warn("RHS vector has very small norm; system may be underconstrained or incorrectly assembled.")
+        if rhs_norm < 1e-12 and self.res_norm > 1e-9 : # If RHS is virtually zero, residual should also be
+             warnings.warn(f"RHS vector norm is very small ({rhs_norm:.2e}), but residual norm is {self.res_norm:.2e}. Solution might be problematic.")
+        elif self.rel_res > 1e-6: # Arbitrary threshold for concerning relative residual
+             warnings.warn(f"Relative residual norm is high: {self.rel_res:.2e}. Solution accuracy may be poor.")
 
         n = self.mesh.nodes.shape[0]
     
         self.u1 = sol[:n]
         self.u2 = sol[n:2*n]
         self.p = sol[2*n:]
-        
-        # Copies the correct velocity from the master to the slave
-        self.u1[self.slave_nodes] = self.u1[self.master_nodes]
-        self.u2[self.slave_nodes] = self.u2[self.master_nodes]
+
 
     def run(self):
         total_start = datetime.now()
@@ -281,7 +263,7 @@ class Simulation:
         plot_velocity_vectors(self.mesh, self.u1, self.u2, title_suffix=desc) 
 
         
-    def apply_boundary_conditions(self):
+    def apply_periodic_bc(self):
         """
         Vectorized version:
         - No-slip condition on wall nodes (u1 = u2 = 0)
@@ -290,42 +272,105 @@ class Simulation:
         n = self.mesh.nodes.shape[0]
         lhs = self.lhs.tolil()  # Faster for row operations
         rhs = self.rhs
-        periodic_slaves = set(self.mesh.periodic_map.keys())
-    
-        # --- Collect all unique boundary nodes ---
-        boundary_nodes = np.unique(np.array(self.mesh.interior_boundary_edges).flatten())
         
-        # Remove periodic slave nodes
-        boundary_nodes = np.array([node for node in boundary_nodes if node not in periodic_slaves])
+        # Enforce periodicity (slave-master)
+        self.slave_nodes = np.array(list(self.mesh.periodic_map.keys()))
+        self.master_nodes = np.array([self.mesh.periodic_map[node] for node in self.slave_nodes])
+        n = self.mesh.nodes.shape[0]
+        
+        # --- u1 (x-velocity) DOFs ---
+        slave_dof_u1 = self.slave_nodes         
+        master_dof_u1 = self.master_nodes
+        for s, m in zip(slave_dof_u1, master_dof_u1):
+            self.lhs.rows[s] = [s, m]
+            self.lhs.data[s] = [1.0, -1.0]
+            self.rhs[s] = 0.0
+        
+        # --- u2 (y-velocity) DOFs ---
+        slave_dof_u2 = self.slave_nodes + n
+        master_dof_u2 = self.master_nodes + n
+        for s, m in zip(slave_dof_u2, master_dof_u2):
+            self.lhs.rows[s] = [s, m]
+            self.lhs.data[s] = [1.0, -1.0]
+            self.rhs[s] = 0.0
+            
+        # --- Pressure DOFs (P1 nodes) ---
+        offset = 2 * n
+        for slave_node, master_node in self.mesh.periodic_map.items():
+            # Only apply periodic constraint if both nodes are pressure nodes
+            if slave_node in self.mesh.pressure_index_map and master_node in self.mesh.pressure_index_map:
+                slave_dof = offset + self.mesh.pressure_index_map[slave_node]
+                master_dof = offset + self.mesh.pressure_index_map[master_node]
+                self.lhs.rows[slave_dof] = [slave_dof, master_dof]
+                self.lhs.data[slave_dof] = [1.0, -1.0]
+                self.rhs[slave_dof] = 0.0
     
-        # Create velocity DOFs: u1 (x) and u2 (y)
+        # --- Set no-slip on interior boundary wall ---
+        boundary_nodes = np.unique(np.array(self.mesh.interior_boundary_edges).flatten())
         boundary_dofs_u1 = boundary_nodes
         boundary_dofs_u2 = boundary_nodes + n
         all_boundary_dofs = np.concatenate([boundary_dofs_u1, boundary_dofs_u2])
     
-        # Zeroing of boundary rows and setting diagonal
         for dof in all_boundary_dofs:
-            lhs.rows[dof] = [dof]
-            lhs.data[dof] = [1.0]
-            rhs[dof] = 0.0
-    
+            apply_dirichlet_bc(lhs, rhs, dof, 0.0)
+            
         # --- Fix pressure at one arbitrary node ---
-        target_y = 0.5 * np.max(self.mesh.nodes[:, 1])
-        target_x = 0.1
-        anchor_node = min(
-            self.mesh.pressure_nodes,
-            key=lambda idx: (self.mesh.nodes[idx][1] - target_y)**2 + (self.mesh.nodes[idx][0] - target_x)**2
-        )
-    
-        print(f"Anchoring using node: {anchor_node} at coordinates {self.mesh.nodes[anchor_node][:2]}")
+        target_y = 0 * np.max(self.mesh.nodes[:, 1])
+        target_x = 0.5 * np.max(self.mesh.nodes[:, 0])
+
+        slave_pressure_nodes = set(self.mesh.periodic_map.keys()) & set(self.mesh.pressure_index_map.keys())
+        candidates = [idx for idx in self.mesh.pressure_nodes if idx not in slave_pressure_nodes]
+        
+        if not candidates:
+            raise RuntimeError("No valid (non-slave) pressure nodes available for anchoring.")
+        
+        anchor_node = min(candidates, key=lambda idx: (self.mesh.nodes[idx][1] - target_y)**2 + (self.mesh.nodes[idx][0] - target_x)**2)
+
+        print("\rAnchoring using node: ", anchor_node, ".    ")
     
         pressure_dof_local = self.mesh.pressure_index_map[anchor_node]
-        anchor_dof_global = 2 * n + pressure_dof_local
+        anchor_dof = 2 * n + pressure_dof_local
+        apply_dirichlet_bc(lhs, rhs, anchor_dof, 0.0)
     
-        lhs[anchor_dof_global, :] = 0.0
-        lhs[anchor_dof_global, anchor_dof_global] = 1.0
-        rhs[anchor_dof_global] = 0.0
     
+    def apply_inflow_outflow_bc(self):
+        """
+        Applies:
+        - No-slip condition on wall nodes (Dirichlet on velocity)
+        - Dirichlet pressure BCs: high pressure at inlet, low at outlet
+        """
+        n = self.mesh.nodes.shape[0]
+        lhs = self.lhs.tolil()
+        rhs = self.rhs
+        
+        wall_nodes = np.unique(np.array(self.mesh.wall_edges).flatten())
+        inlet_nodes = np.unique(np.array(self.mesh.inlet_edges).flatten())
+        outlet_nodes = np.unique(np.array(self.mesh.outlet_edges).flatten())
+        
+        inlet_corner_nodes = np.intersect1d(inlet_nodes, wall_nodes)
+        outlet_corner_nodes = np.intersect1d(outlet_nodes, wall_nodes)
+        conflicting_nodes = np.union1d(inlet_corner_nodes, outlet_corner_nodes)
+        
+        outlet_nodes = np.setdiff1d(outlet_nodes, conflicting_nodes)
+        inlet_nodes = np.setdiff1d(inlet_nodes, conflicting_nodes)
+    
+        # --- No-slip on wall nodes ---
+        for node in wall_nodes:
+            for comp in [0, 1]:  # u1, u2
+                dof = node + comp * n
+                apply_dirichlet_bc(lhs, rhs, dof, 0.0)
+    
+        # --- Dirichlet pressure at outlet ---
+        target_y = 0 * np.max(self.mesh.nodes[:, 1])
+        target_x = 0.5 * np.max(self.mesh.nodes[:, 0])
+        
+        outlet_pressure_nodes = [i for i in outlet_nodes if i in self.mesh.pressure_index_map]
+        if not outlet_pressure_nodes:
+            raise RuntimeError("No pressure nodes found on outlet.")
+        outlet_node = min(outlet_pressure_nodes, key=lambda idx: (self.mesh.nodes[idx][1] - target_y)**2 + (self.mesh.nodes[idx][0] - target_x)**2)
+        pressure_dof_local = self.mesh.pressure_index_map[outlet_node]
+        apply_dirichlet_bc(lhs, rhs, 2 * n + pressure_dof_local, 0)
+
 
     def debug_system(self, tol=1e-12):
         """
@@ -359,6 +404,8 @@ class Simulation:
             diag = AtA.diagonal()
             numerical_rank = np.sum(np.abs(diag) > tol)
             print(f"\rNumerical rank estimate: {numerical_rank} / {self.lhs.shape[0]}")
+            if numerical_rank < self.lhs.shape[0]:
+                warnings.warn("System matrix is numerically rank deficient. This could cause instability or ill-conditioning.")
         except Exception as e:
             print(f"\rRank check failed: {e}")
         
@@ -368,54 +415,65 @@ class Simulation:
         print(f"Matrix sparsity: {100*nnz/total:.2e}% nonzero entries.")
         print("--- End Debug Info ---")
 
-
     def calculate_permeability(self, direction='y'):
-        if direction != 'y':
-            raise NotImplementedError("Only vertical permeability (y-direction) is currently supported.")
-    
+        nodes = self.mesh.nodes[:, :2]
         triangles = self.mesh.triangles
-        nodes = self.mesh.nodes[:, :2]  # Drop z
-        u = self.u2  # vertical velocity
+        u2 = self.u2
     
-        total_flow = 0.0
-        total_area = 0.0
+        area_weighted_velocity = 0.0
+    
+        # Quadrature: Barycentric coordinates and weights for 7-point integration
+        bary_coords = np.array([
+            [1/3, 1/3, 1/3],
+            [0.0597158717, 0.4701420641, 0.4701420641],
+            [0.4701420641, 0.0597158717, 0.4701420641],
+            [0.4701420641, 0.4701420641, 0.0597158717],
+            [0.7974269853, 0.1012865073, 0.1012865073],
+            [0.1012865073, 0.7974269853, 0.1012865073],
+            [0.1012865073, 0.1012865073, 0.7974269853],
+        ])
+        weights = np.array([
+            0.225,
+            0.1323941527,
+            0.1323941527,
+            0.1323941527,
+            0.1259391805,
+            0.1259391805,
+            0.1259391805,
+        ])
     
         for tri in triangles:
-            # Get coordinates of the 3 P1 vertex nodes
-            v0 = nodes[tri[0]]
-            v1 = nodes[tri[1]]
-            v2 = nodes[tri[2]]
+            coords = nodes[tri]
+            v0, v1, v2 = coords[:3]
+            J = np.column_stack((v1 - v0, v2 - v0))
+            triangle_area = abs(np.linalg.det(J)) / 2
+            u2_local = u2[tri]
+            
+            triangle_velocity = 0.0
+            
+            # Use quadrature for evaluating average velocity of triangle.
+            for bary, weight in zip(bary_coords, weights):
+                xi, eta = bary[1], bary[2]
+                N = np.array([P2_basis(i, xi, eta) for i in range(6)])
+                u2_at_point = N @ u2_local
     
-            # Compute area of triangle
-            area = 0.5 * abs(
-                (v1[0] - v0[0]) * (v2[1] - v0[1]) -
-                (v2[0] - v0[0]) * (v1[1] - v0[1])
-            )
+                triangle_velocity += u2_at_point * weight * triangle_area
     
-            # Average vertical velocity (all 6 P2 nodes)
-            u_avg = np.mean(u[tri])
+            area_weighted_velocity += triangle_velocity
     
-            total_flow += u_avg * area
-            total_area += area
+        self.avg_velocity = area_weighted_velocity 
+        self.k = (2 / 3) * (0.001**2) * abs(self.avg_velocity)
     
-        # Control area deviation
-        actual_area = (self.geometry_length ** 2 ) - np.pi * (self.inner_radius ** 2)
-        rel_dev = abs(total_area - actual_area) / actual_area
-        print(f"Relative deviation in calculated area: {rel_dev:.3g}")
+        print(f"Avg y-velocity: {self.avg_velocity:.4e} m/s")
+        print(f"Permeability: {self.k:.4e} m²")
         
-        avg_v = total_flow / total_area
-        f_magnitude = abs(self.f(0, 0)[1])  # Assume vertical force only
-    
-        # Darcy's law with parabolic correction
-        k = (2 / 3) * self.mu * abs(avg_v) / f_magnitude
-    
-        avg_velocity = float(f"{avg_v:.4e}")
-        self.permeability = float(f"{k:.4e}")
-    
-        print(f"Avg velocity:     {avg_velocity} m/s")
-        print(f"Permeability:     {self.permeability} m²")
-        return self.permeability
+        return self.k
 
+def apply_dirichlet_bc(lhs, rhs, dof, value):
+    lhs[dof, :] = 0.0
+    lhs[:, dof] = 0.0
+    lhs[dof, dof] = 1.0
+    rhs[dof] = value
 
 def canonical_dof(node, periodic_map):
     """Redirects node to its periodic master if needed."""
@@ -449,10 +507,10 @@ def LoadAssembler2D(nodes, triangles, f, periodic_map):
     b1 = np.zeros(n_nodes)
     b2 = np.zeros(n_nodes)
 
-    for triangle in triangles:
-        b1_local, b2_local = localLoadVector2D(nodes, triangle, f)
+    for tri in triangles:
+        b1_local, b2_local = localLoadVector2D(nodes, tri, f)
         for i in range(6):
-            node = canonical_dof(triangle[i], periodic_map)
+            node = canonical_dof(tri[i], periodic_map)
             b1[node] += b1_local[i]
             b2[node] += b2_local[i]
 
@@ -488,28 +546,28 @@ def localLoadVector2D(nodes, triangle, f):
 
     # Affine transform to real triangle
     J = np.column_stack((v1 - v0, v2 - v0))
-    detJ = abs(np.linalg.det(J))
+    area = abs(np.linalg.det(J))/2
 
     # Barycentric quadrature points and weights
     bary_coords = np.array([
-        [1/6, 1/6, 2/3],
-        [1/6, 2/3, 1/6],
-        [2/3, 1/6, 1/6]
+        [1/2, 1/2, 0],
+        [0, 1/2, 1/2],
+        [1/2, 0, 1/2]
     ])
     weights = np.array([1/3, 1/3, 1/3])
 
     b1_local = np.zeros(6)
     b2_local = np.zeros(6)
 
-    for q, w in zip(bary_coords, weights):
-        xi, eta = q[0], q[1]
-        x, y = v0 + xi * (v1 - v0) + eta * (v2 - v0)
+    for (L1, L2, L3), w in zip(bary_coords, weights):
+        xi, eta = L2, L3
+        x, y = L1 * v0 + L2 * v1 + L3 * v2  # barycentric to Cartesian
         fx, fy = f(x, y)
 
         for i in range(6):
-            phi = P2_basis(i, xi, eta)
-            b1_local[i] += fx * phi * w * detJ / 2
-            b2_local[i] += fy * phi * w * detJ / 2
+            N_i = P2_basis(i, xi, eta)
+            b1_local[i] += fx * N_i * w * area
+            b2_local[i] += fy * N_i * w * area
 
     return b1_local, b2_local
 
@@ -534,14 +592,15 @@ def StiffnessAssembler2D(nodes, triangles, periodic_map):
     n_nodes = nodes.shape[0]
     A = sp.lil_matrix((n_nodes, n_nodes))
 
-    for triangle in triangles:
-        A_local = localStiffnessMatrix2D(nodes, triangle)
+    for tri in triangles:
+        A_local = localStiffnessMatrix2D(nodes, tri)
         for i in range(6):
+            i_global = canonical_dof(tri[i], periodic_map)
             for j in range(6):
-                i_global = canonical_dof(triangle[i], periodic_map)
-                j_global = canonical_dof(triangle[j], periodic_map)
+                j_global = canonical_dof(tri[j], periodic_map)
                 A[i_global, j_global] += A_local[i, j]
     return A
+
 
 @njit
 def localStiffnessMatrix2D(nodes, triangle):
@@ -562,32 +621,43 @@ def localStiffnessMatrix2D(nodes, triangle):
     A_local : ndarray of shape (6, 6)
         Local stiffness matrix.
     """
-    coords = nodes[triangle][:, :2]  # Removing z-coordinates - shape (6, 2)
-
+    coords = nodes[triangle][:, :2]  # Removing z-coordinates
+    v0, v1, v2 = coords[:3]
+    
     # Quadrature points and weights in barycentric coordinates
     bary_coords = np.array([
-        [1/6, 1/6, 2/3],
-        [1/6, 2/3, 1/6],
-        
-        [2/3, 1/6, 1/6]
+        [1/3, 1/3, 1/3],
+        [0.0597158717, 0.4701420641, 0.4701420641],
+        [0.4701420641, 0.0597158717, 0.4701420641],
+        [0.4701420641, 0.4701420641, 0.0597158717],
+        [0.7974269853, 0.1012865073, 0.1012865073],
+        [0.1012865073, 0.7974269853, 0.1012865073],
+        [0.1012865073, 0.1012865073, 0.7974269853],
     ])
-    weights = np.array([1/3, 1/3, 1/3])
+    weights = np.array([
+        0.225,
+        0.1323941527,
+        0.1323941527,
+        0.1323941527,
+        0.1259391805,
+        0.1259391805,
+        0.1259391805,
+    ])
 
     # Build affine map from reference triangle to real triangle (vertices only)
-    v0, v1, v2 = coords[:3]
     J = np.column_stack((v1 - v0, v2 - v0))  # Jacobian
-    detJ = abs(np.linalg.det(J))
+    area = abs(np.linalg.det(J)) / 2    
     invJT = np.linalg.inv(J).T
-    G = detJ * (invJT @ invJT.T)
 
-    A_local = np.zeros((6, 6))
-
-    for q, w in zip(bary_coords, weights):
-        xi, eta = q[0], q[1]
+    A_local = np.zeros((6,6))
+    for (L1, L2, L3), w in zip(bary_coords, weights):
+        xi, eta = L2, L3
         for i in range(6):
+            gradN_i = invJT @ P2_grad(i, xi, eta)
             for j in range(6):
-                A_local[i, j] += w * (P2_grad(i, xi, eta) @ G @ P2_grad(j, xi, eta)) / 2
-
+                gradN_j = invJT @ P2_grad(j, xi, eta)
+                A_local[i,j] += w * (gradN_i @ gradN_j) * area
+                
     return A_local
 
 def MassAssembler2D(nodes, triangles, periodic_map):
@@ -609,12 +679,12 @@ def MassAssembler2D(nodes, triangles, periodic_map):
     n_nodes = nodes.shape[0]
     M = sp.lil_matrix((n_nodes, n_nodes))
 
-    for triangle in triangles:
-        M_local = localMassMatrix2D(nodes, triangle)
+    for tri in triangles:
+        M_local = localMassMatrix2D(nodes, tri)
         for i in range(6):
+            i_global = canonical_dof(tri[i], periodic_map)
             for j in range(6):
-                i_global = canonical_dof(triangle[i], periodic_map)
-                j_global = canonical_dof(triangle[j], periodic_map)
+                j_global = canonical_dof(tri[j], periodic_map)
                 M[i_global, j_global] += M_local[i, j]
     return M
 
@@ -637,31 +707,45 @@ def localMassMatrix2D(nodes, triangle):
         Local mass matrix.
     """
     coords = nodes[triangle][:, :2]
+
+    # Build affine map from reference triangle to real triangle (vertices only)
     v0, v1, v2 = coords[:3]
+    J = np.column_stack((v1 - v0, v2 - v0))  # Jacobian
+    area = abs(np.linalg.det(J)) / 2
 
-    # Jacobian
-    J = np.column_stack((v1 - v0, v2 - v0))
-    detJ = abs(np.linalg.det(J))
-
-    # Barycentric quadrature
     bary_coords = np.array([
-        [1/6, 1/6, 2/3],
-        [1/6, 2/3, 1/6],
-        [2/3, 1/6, 1/6]
+        [1/3, 1/3, 1/3],
+        [0.0597158717, 0.4701420641, 0.4701420641],
+        [0.4701420641, 0.0597158717, 0.4701420641],
+        [0.4701420641, 0.4701420641, 0.0597158717],
+        [0.7974269853, 0.1012865073, 0.1012865073],
+        [0.1012865073, 0.7974269853, 0.1012865073],
+        [0.1012865073, 0.1012865073, 0.7974269853],
     ])
-    weights = np.array([1/3, 1/3, 1/3])
+    weights = np.array([
+        0.225,
+        0.1323941527,
+        0.1323941527,
+        0.1323941527,
+        0.1259391805,
+        0.1259391805,
+        0.1259391805,
+    ])
 
     M_local = np.zeros((6, 6))
 
-    for q, w in zip(bary_coords, weights):
-        xi, eta = q[0], q[1]
-        phi = np.array([P2_basis(i, xi, eta) for i in range(6)])
-        M_local += w * np.outer(phi, phi) * detJ / 2
+    for (L1, L2, L3), w in zip(bary_coords, weights):
+        for i in range(6):
+            xi, eta = L2, L3
+            N_i = P2_basis(i, xi, eta)
+            for j in range(6):
+                N_j = P2_basis(j, xi, eta)
+                M_local[i, j] += w * (N_i * N_j ) * area
 
     return M_local
 
 
-def DivergenceAssembler2D(nodes, triangles, pressure_nodes, periodic_map):
+def DivergenceAssembler2D(nodes, triangles, pressure_nodes, pressure_index_map, periodic_map):
     """
     Assembles the global divergence matrices B1 and B2, from P2 velocity degrees 
     of freedom and P1 pressure degrees of freedom. 
@@ -685,8 +769,6 @@ def DivergenceAssembler2D(nodes, triangles, pressure_nodes, periodic_map):
     B1, B2
     """
     
-    pressure_index_map = {node: i for i, node in enumerate(pressure_nodes)}
-
     n_p = len(pressure_nodes)
     n_v = nodes.shape[0]  # velocity nodes (P2)
     B1 = sp.lil_matrix((n_p, n_v))
@@ -695,15 +777,15 @@ def DivergenceAssembler2D(nodes, triangles, pressure_nodes, periodic_map):
     for tri in triangles:
         B1_local, B2_local = localDivergenceMatrix2D(nodes, tri)
         for i in range(3):  # Only first 3 nodes of each triangle are vertex nodes (P1)
-            p_node = tri[i]
-            if p_node in pressure_index_map:
-                p_idx = pressure_index_map[p_node]
-                for j in range(6):
-                    v_node = canonical_dof(tri[j], periodic_map)
-                    B1[p_idx, v_node] += B1_local[i, j]
-                    B2[p_idx, v_node] += B2_local[i, j]
+            canonical_p_node = canonical_dof(tri[i], periodic_map)
+            p_idx = pressure_index_map[canonical_p_node]            
+            
+            for j in range(6):
+                v_indx = canonical_dof(tri[j], periodic_map)
+                B1[p_idx, v_indx] += B1_local[i, j]
+                B2[p_idx, v_indx] += B2_local[i, j]
 
-    return B1, B2
+    return -B1, -B2 # Minus sign from defintion of our divergence matrix
 
 @njit
 def localDivergenceMatrix2D(nodes, triangle):
@@ -734,30 +816,42 @@ def localDivergenceMatrix2D(nodes, triangle):
 
     # Build Jacobian for affine map
     J = np.column_stack((v1 - v0, v2 - v0))
-    detJ = abs(np.linalg.det(J))
+    area = abs(np.linalg.det(J)) / 2
     invJT = np.linalg.inv(J).T
 
     # Quadrature points (same as in stiffness matrix)
     bary_coords = np.array([
-        [1/6, 1/6, 2/3],
-        [1/6, 2/3, 1/6],
-        [2/3, 1/6, 1/6]
+        [1/3, 1/3, 1/3],
+        [0.0597158717, 0.4701420641, 0.4701420641],
+        [0.4701420641, 0.0597158717, 0.4701420641],
+        [0.4701420641, 0.4701420641, 0.0597158717],
+        [0.7974269853, 0.1012865073, 0.1012865073],
+        [0.1012865073, 0.7974269853, 0.1012865073],
+        [0.1012865073, 0.1012865073, 0.7974269853],
     ])
-    weights = np.array([1/3, 1/3, 1/3])
-
+    weights = np.array([
+        0.225,
+        0.1323941527,
+        0.1323941527,
+        0.1323941527,
+        0.1259391805,
+        0.1259391805,
+        0.1259391805,
+    ])
+    
     B1_local = np.zeros((3, 6))
     B2_local = np.zeros((3, 6))
 
-    for q, w in zip(bary_coords, weights):
-        xi, eta = q[0], q[1]
+    for (L1, L2, L3), w in zip(bary_coords, weights):
+        xi, eta = L2, L3
         for i in range(3):
+            M_i = P1_basis(i, xi, eta)
             for j in range(6):
-                grad_ref = P2_grad(j, xi, eta)
-                grad_xy = invJT @ grad_ref
-                B1_local[i, j] += w * grad_xy[0] * detJ / 2
-                B2_local[i, j] += w * grad_xy[1] * detJ / 2
+                gradN_j = invJT @ P2_grad(j, xi, eta)
+                B1_local[i, j] += M_i * gradN_j[0] * w * area
+                B2_local[i, j] += M_i * gradN_j[1] * w * area
 
-    return -B1_local, -B2_local # Minus sign from defintion of our divergence matrix
+    return B1_local, B2_local 
 
 def plot_velocity_magnitude(mesh, u1, u2, title_suffix=""):
     magnitude = np.sqrt(u1**2 + u2**2)
@@ -783,8 +877,8 @@ def plot_velocity_magnitude(mesh, u1, u2, title_suffix=""):
     plt.close()
     
     # --- NEW: Print some useful statistics ---
-    print(f"\rMax velocity magnitude: {np.max(magnitude):.3e} m/s")
-    print(f"Min velocity magnitude: {np.min(magnitude):.3e} m/s")
+    print(f"\rMax node velocity magnitude: {np.max(magnitude):.3e} m/s")
+    print(f"Min node velocity magnitude: {np.min(magnitude):.3e} m/s")
 
     return magnitude
     
@@ -816,39 +910,62 @@ def plot_pressure(mesh, pressure, title_suffix=""):
     plt.show()
     plt.close()
 
-    # --- NEW: Print some useful statistics ---
     print(f"Max pressure: {np.max(pressure):.4e} Pa")
     print(f"Min pressure: {np.min(pressure):.4e} Pa")
     return
 
 def plot_velocity_vectors(mesh, u1, u2, title_suffix=""):
+    """
+    Plot velocity vectors at uniformly spaced points, excluding ones too far from the mesh.
+
+    Parameters:
+    -----------
+    max_distance : float
+        Maximum allowed distance (in mm) from a grid point to a mesh node. 
+        Grid points farther than this are ignored.
+    """
     x = mesh.nodes[:, 0] * 1000  # mm
     y = mesh.nodes[:, 1] * 1000
     u = u1
     v = u2
-
     magnitude = np.sqrt(u**2 + v**2)
-    N = min(1500, len(u))  # Number of vectors to show
-    idx = np.random.choice(len(u), size=N, replace=False)
 
-    # Normalize vectors for uniform length
+    # Build spatial index
+    kdtree = cKDTree(np.column_stack([x, y]))
+
+    # Create uniform grid
+    nx, ny = 30, 30
+    x_grid = np.linspace(np.min(x), np.max(x), nx)
+    y_grid = np.linspace(np.min(y), np.max(y), ny)
+    xv, yv = np.meshgrid(x_grid, y_grid)
+    grid_points = np.column_stack([xv.ravel(), yv.ravel()])
+
+    # Find closest mesh node and distance
+    distances, idx = kdtree.query(grid_points)
+
+    # Filter valid indices
+    idx = np.unique(idx)
+
+    # Normalize velocity direction
     u_dir = np.zeros_like(u)
     v_dir = np.zeros_like(v)
     nonzero = magnitude > 1e-14
     u_dir[nonzero] = u[nonzero] / magnitude[nonzero]
     v_dir[nonzero] = v[nonzero] / magnitude[nonzero]
 
+    # Plot
     plt.figure(figsize=(6, 5), dpi=300)
     quiv = plt.quiver(
         x[idx], y[idx],
         u_dir[idx], v_dir[idx],
-        magnitude[idx],            # Still color by original magnitude
-        angles='xy',     # scale controls arrow length
-        scale_units='xy', cmap='viridis'
+        magnitude[idx],
+        angles='xy',
+        scale_units='xy',
+        cmap='viridis'
     )
 
     plt.colorbar(quiv, label='Velocity Magnitude [m/s]')
-    plt.title(f"Velocity Direction (colored by magnitude)\n{title_suffix}\n ", fontsize=10)
+    plt.title(f"Velocity Direction (colored by magnitude)\n{title_suffix}\n", fontsize=10)
     plt.xlabel("x [mm]")
     plt.ylabel("y [mm]")
     plt.gca().set_aspect("equal")
@@ -858,7 +975,6 @@ def plot_velocity_vectors(mesh, u1, u2, title_suffix=""):
     plt.savefig(f"plots/velocity_vectors_colored_{safe_desc}.png", dpi=300)
     plt.show()
     plt.close()
-
     
 def load_simulation(filename):
     """
@@ -881,6 +997,16 @@ def load_simulation(filename):
     print(f"Loaded simulation from '{filename}'")
     return sim
     
+@njit
+def P1_basis(i, xi, eta):
+    if i == 0:
+        return (1 - xi - eta)
+    elif i == 1:
+        return xi
+    elif i == 2:
+        return eta
+    else:
+        return 0
     
 @njit
 def P2_basis(i, xi, eta):
@@ -897,13 +1023,12 @@ def P2_basis(i, xi, eta):
     elif i == 5:
         return 4 * eta * (1 - xi - eta)
     else:
-        return 0.0  # fallback
+        return 0
 
 @njit
 def P2_grad(i, xi, eta):
     if i == 0:
-        g = 4 * xi + 4 * eta - 3
-        return np.array([g, g])
+        return np.array([4 * xi + 4 * eta - 3, 4 * xi + 4 * eta - 3])
     elif i == 1:
         return np.array([4 * xi - 1, 0.0])
     elif i == 2:
@@ -915,8 +1040,7 @@ def P2_grad(i, xi, eta):
     elif i == 5:
         return np.array([-4 * eta, 4 - 4 * xi - 8 * eta])
     else:
-        return np.array([0.0, 0.0])
-    
+        return np.array([0.0, 0.0])    
     
 if __name__ == "__main__":
     # Create folders if it does not exist
@@ -924,12 +1048,14 @@ if __name__ == "__main__":
     os.makedirs("simulations", exist_ok=True)
     
     # Define constants
-    geometry_length = 0.001 # meters 0.001 is 1mm
-    mesh_size = geometry_length * 0.005 # meters
-    inner_radius = geometry_length * 0.47
-    geometry_height = 0.000091 # 91 micrometer thickness
-    mu = 0.00089 # Viscosity Pa*s
-    rho = 1000.0 # Density kg/m^3
+    geometry_length = 1 # meters 0.001 is 1mm
+    mesh_size = geometry_length * 0.05 # meters
+    inner_radius = geometry_length * 0.40
+    geometry_height = 0.091 # 91 micrometer thickness
+    mu = 1# 0.00089 # Viscosity Pa*s
+    rho = 1# 1000.0 # Density kg/m^3
+    
+    periodic = True
     
     # Body forces
     def f(x, y):
@@ -937,22 +1063,25 @@ if __name__ == "__main__":
 
     # Create mesh
     mesh_start = datetime.now()
-    create_mesh(geometry_length, mesh_size, inner_radius, "square_with_hole.msh")
+    #create_mesh(3,4,geometry_length, mesh_size, inner_radius, "square_with_hole.msh", periodic=periodic)
+    create_mesh(geometry_length, mesh_size, inner_radius, "square_with_hole.msh", periodic=periodic)
     mesh_time = datetime.now()
     print(f"Created mesh in in {(mesh_time - mesh_start).total_seconds():.3f} seconds.")
 
     raw_mesh = meshio.read("square_with_hole.msh")
-    mesh = load_mesh(raw_mesh)
+    mesh = load_mesh(raw_mesh, periodic)
     mesh.mesh_size = mesh_size  # manually attach it
     load_time = datetime.now()
-    print(f"Loaded mesh with length: {geometry_length} and radius: {inner_radius}, with {mesh.triangles.shape[0]} elements in {(load_time - mesh_time).total_seconds():.3f} seconds.")
+    print(f"Mesh loaded: {mesh.triangles.shape[0]} P2 elements, {mesh.nodes.shape[0]} P2 nodes.")
+    print(f"Mesh loading and processing time: {(load_time - mesh_time).total_seconds():.3f} seconds.")
 
     mesh.check_mesh_quality()
     check_time = datetime.now()
     print(f"Checked mesh in {(check_time - load_time).total_seconds():.3f} seconds.")
 
     # Setup and run simulation
-    sim = Simulation(mesh, f, geometry_length, inner_radius, geometry_height, mu=mu, rho=rho)
+    sim = Simulation(mesh, f, geometry_length, inner_radius, geometry_height, mu=mu, rho=rho, periodic_bc=periodic) #"periodic"
+    print(f"Simulation parameters: {sim.get_description()}")
     sim.run()
     
     start_calc = datetime.now()

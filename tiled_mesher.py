@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# mesher.py
+# tiled_mesher.py
 """
 Created on Fri Apr 25 11:23:45 2025
 
@@ -62,7 +62,7 @@ class Mesh:
         Plots the mesh geometry, including edge types and optionally node IDs.
         Saves the plot as a PNG image.
 
-    plot_periodic_()
+    plot_periodic_pairs()
         Visualizes periodic slave-master node pairs using color-coded markers.
         Saves the plot as a PNG image.
 
@@ -71,7 +71,7 @@ class Mesh:
         Reports number of inverted or zero-area triangles.
     """
 
-    def __init__(self, nodes, triangles, interior_edges,pressure_nodes, pressure_index_map, 
+    def __init__(self, nodes, triangles, interior_edges, pressure_nodes, pressure_index_map, 
                  interior_boundary_edges=None, exterior_boundary_edges=None, 
                  inlet_edges=None, 
                  outlet_edges=None,
@@ -88,7 +88,6 @@ class Mesh:
         self.pressure_nodes = pressure_nodes
         self.pressure_index_map = pressure_index_map
         self.periodic_map = periodic_map or {}
-
 
     def plot(self, show_node_ids=False, filename="mesh_plot.png"):
         """
@@ -132,9 +131,8 @@ class Mesh:
         draw_edges(self.interior_edges, 'C0', 'Interior')
         draw_edges(self.interior_boundary_edges, 'C1', 'Interior wall')
         draw_edges(self.exterior_boundary_edges, 'C2', 'Periodic BC')
-        #draw_edges(self.inlet_edges, 'C1', 'Inlet')
-        #draw_edges(self.outlet_edges, 'C2', 'Outlet')
-        #draw_edges(self.wall_edges, 'C3', 'Wall')
+        #draw_edges(self.inlet_edges, 'C3', 'Inlet')
+        #draw_edges(self.outlet_edges, 'C4', 'Outlet')
 
         # Remove duplicate labels
         handles, labels = plt.gca().get_legend_handles_labels()
@@ -153,7 +151,7 @@ class Mesh:
         print(f"\rPlotted mesh in {(end_plot - start_plot).total_seconds():.3f} seconds.")
         print(f"Mesh plot saved as {filename}.")
 
-    def plot_periodic(self):
+    def plot_periodic_pairs(self):
         """
         Plots each periodic slave/master node pair with a unique color and marker.
         """
@@ -315,10 +313,7 @@ class Mesh:
             "max_aspect_ratio": aspect_ratios.max(),
             "area_range": (areas.min(), areas.max())
         }
-    
-    def plot_nodes(self, annotate=False):
-        self.plot_pressure_nodes(filename="pressure_nodes.png", annotate=annotate)
-        self.plot_velocity_nodes(filename="velocity_nodes.png", annotate=annotate)
+
 
     def plot_pressure_nodes(self, filename="pressure_nodes.png", annotate=False):
         """
@@ -358,6 +353,7 @@ class Mesh:
         plt.savefig(filename, dpi=300)
         plt.show()
         print(f"Saved pressure node plot to {filename}.")
+
 
     def plot_velocity_nodes(self, filename="velocity_nodes.png", annotate=False):
         """
@@ -400,126 +396,85 @@ class Mesh:
         print(f"Saved velocity node plot to {filename}.")
     
 
-def create_mesh(geometry_length=0.01, mesh_size=0.0001, inner_radius=0.004, output_file="square_with_hole.msh", periodic=True):
-    """
-    Generates a 2D unstructured P2 triangular mesh of a square domain with a circular hole.
-
-    The domain is a unit square [0,l] x [0,l] with a circular hole of radius l/3 centered at (l/2, l/2).
-    The mesh is generated using Gmsh and saved to a `.msh` file.
-
-    Parameters
-    ----------
-    mesh_size : float
-        Target element size for the mesh (controls mesh resolution).
-
-    output_file: str
-        Name of file to save mesh to.
-        
-    Returns
-    -------
-    None
-    """
+def create_mesh(n, m, geometry_length=0.01, mesh_size=0.0001, inner_radius=0.004, output_file="tiled_mesh.msh", periodic=False):
     gmsh.initialize()
-    gmsh.model.add(output_file.rstrip(".msh"))
-    
-    l = geometry_length
+    gmsh.model.add("tiled_mesh")
 
-    # Outer square
-    s_p1 = gmsh.model.occ.addPoint(0.0, 0.0, 0.0, mesh_size)
-    s_p2 = gmsh.model.occ.addPoint(l, 0.0, 0.0, mesh_size)
-    s_p3 = gmsh.model.occ.addPoint(l, l, 0.0, mesh_size)
-    s_p4 = gmsh.model.occ.addPoint(0.0, l, 0.0, mesh_size)
+    all_surfaces = []
 
-    l1 = gmsh.model.occ.addLine(s_p1, s_p2)  # bottom
-    l2 = gmsh.model.occ.addLine(s_p2, s_p3)  # right
-    l3 = gmsh.model.occ.addLine(s_p3, s_p4)  # top
-    l4 = gmsh.model.occ.addLine(s_p4, s_p1)  # left
-    
+    for i in range(n):
+        for j in range(m):
+            dx = i * geometry_length
+            dy = j * geometry_length
+
+            # --- Create one unit cell centered at offset (dx, dy) ---
+            # 1. Create geometry as in create_mesh(), but offset every point by (dx, dy)
+            # 2. Subtract circle from square
+            # 3. Store resulting surface
+
+            surface = _add_unit_cell(dx, dy, geometry_length, inner_radius, mesh_size)
+            all_surfaces.append(surface)
+
     gmsh.model.occ.synchronize()
-
+    
     if periodic:
-        # --- Add periodicity: bottom (l1) is master, top (l3) is slave ---
-        gmsh.model.mesh.setPeriodic(
-            1,      # 1D entities (curves)
-            [l3],   # slave: top boundary curve
-            [l1],   # master: bottom boundary curve
-            [1, 0, 0, 0,     # x' = x
-             0, 1, 0, -l,    # y' = y - l → shift top to align with bottom
-             0, 0, 1, 0,     # z unchanged
-             0, 0, 0, 1]     # homogeneous coordinate
-        )
-        
-        # --- Add periodicity: left (l4) is master, right (l2) is slave ---
-        gmsh.model.mesh.setPeriodic(
-            1,      # 1D entities (curves)
-            [l2],   # slave: right
-            [l4],   # master: left
-            [1, 0, 0, -l,    # x' = x - l
-             0, 1, 0, 0,     # y' = y
-             0, 0, 1, 0,     # z unchanged
-             0, 0, 0, 1]     # homogeneous coordinate
-        )
+        print("ERROR - NOT IMPLEMENTED")
+
+    # --- Create compound surface if needed (optional but good for meshing all at once) ---
+    surface_tags = [(2, s) for s in all_surfaces]
+    gmsh.model.occ.fragment(surface_tags, [])  # Optional cleanup
+
+    # Mesh settings (same as before)
+    gmsh.model.mesh.setOrder(2)
+    gmsh.option.setNumber("Mesh.ElementOrder", 2)
+    gmsh.option.setNumber("Mesh.SecondOrderLinear", 1)
+    gmsh.option.setNumber("Mesh.HighOrderOptimize", 0)
+
+    gmsh.model.occ.synchronize()
+    gmsh.model.occ.removeAllDuplicates()
+
+    gmsh.model.mesh.generate(2)
+    gmsh.write(output_file)
+
+    gmsh.finalize()
+
+def _add_unit_cell(dx, dy, l, r, mesh_size):
+    # Outer square (offset by dx, dy)
+    p1 = gmsh.model.occ.addPoint(dx + 0.0, dy + 0.0, 0, mesh_size)
+    p2 = gmsh.model.occ.addPoint(dx + l,  dy + 0.0, 0, mesh_size)
+    p3 = gmsh.model.occ.addPoint(dx + l,  dy + l,  0, mesh_size)
+    p4 = gmsh.model.occ.addPoint(dx + 0.0, dy + l, 0, mesh_size)
+
+    l1 = gmsh.model.occ.addLine(p1, p2)
+    l2 = gmsh.model.occ.addLine(p2, p3)
+    l3 = gmsh.model.occ.addLine(p3, p4)
+    l4 = gmsh.model.occ.addLine(p4, p1)
 
     square_loop = gmsh.model.occ.addCurveLoop([l1, l2, l3, l4])
     square_surface = gmsh.model.occ.addPlaneSurface([square_loop])
 
-    # Circle hole
-    r = inner_radius
-    center = gmsh.model.occ.addPoint(l/2, l/2, 0.0, mesh_size)
-    c_p1 = gmsh.model.occ.addPoint(l/2 + r, l/2, 0.0, mesh_size)
-    c_p2 = gmsh.model.occ.addPoint(l/2, l/2 + r, 0.0, mesh_size)
-    c_p3 = gmsh.model.occ.addPoint(l/2 - r, l/2, 0.0, mesh_size)
-    c_p4 = gmsh.model.occ.addPoint(l/2, l/2 - r, 0.0, mesh_size)
+    # Circle hole (centered inside square)
+    cx = dx + l/2
+    cy = dy + l/2
+    center = gmsh.model.occ.addPoint(cx, cy, 0, mesh_size)
+    cp1 = gmsh.model.occ.addPoint(cx + r, cy, 0, mesh_size)
+    cp2 = gmsh.model.occ.addPoint(cx, cy + r, 0, mesh_size)
+    cp3 = gmsh.model.occ.addPoint(cx - r, cy, 0, mesh_size)
+    cp4 = gmsh.model.occ.addPoint(cx, cy - r, 0, mesh_size)
 
-    arc1 = gmsh.model.occ.addCircleArc(c_p1, center, c_p2)
-    arc2 = gmsh.model.occ.addCircleArc(c_p2, center, c_p3)
-    arc3 = gmsh.model.occ.addCircleArc(c_p3, center, c_p4)
-    arc4 = gmsh.model.occ.addCircleArc(c_p4, center, c_p1)
+    a1 = gmsh.model.occ.addCircleArc(cp1, center, cp2)
+    a2 = gmsh.model.occ.addCircleArc(cp2, center, cp3)
+    a3 = gmsh.model.occ.addCircleArc(cp3, center, cp4)
+    a4 = gmsh.model.occ.addCircleArc(cp4, center, cp1)
 
-    circle_loop = gmsh.model.occ.addCurveLoop([arc1, arc2, arc3, arc4])
+    circle_loop = gmsh.model.occ.addCurveLoop([a1, a2, a3, a4])
     circle_surface = gmsh.model.occ.addPlaneSurface([circle_loop])
-    
-    # Subtract circle from square
+
+    # Subtract hole
     [cut_surface], _ = gmsh.model.occ.cut([(2, square_surface)], [(2, circle_surface)])
-    gmsh.model.occ.synchronize()  # <--- Synchronize BEFORE mesh field setup
-    
-    # Define points near which we want finer mesh (e.g., near circle center)
-    p_left_circle = gmsh.model.occ.addPoint((geometry_length/2)-inner_radius, geometry_length/2, 0)
-    p_right_circle = gmsh.model.occ.addPoint((geometry_length/2)+inner_radius, geometry_length/2, 0)
-    p_right_wall = gmsh.model.occ.addPoint(geometry_length, geometry_length/2, 0)
-    p_left_wall = gmsh.model.occ.addPoint(0, geometry_length/2, 0)
-    
-    gmsh.model.occ.synchronize()
-    
-    # --- Field 1: Distance from all fine-mesh areas (circle + walls) ---
-    gmsh.model.mesh.field.add("Distance", 1)
-    all_refine_pts = [p_left_circle, p_right_circle, p_left_wall, p_right_wall]
-    gmsh.model.mesh.field.setNumbers(1, "NodesList", all_refine_pts)
-    
-    # --- Field 2: Threshold size control based on distance ---
-    gmsh.model.mesh.field.add("Threshold", 2)
-    gmsh.model.mesh.field.setNumber(2, "InField", 1)
-    gmsh.model.mesh.field.setNumber(2, "SizeMin", 0.2 * mesh_size)   # very fine near features
-    gmsh.model.mesh.field.setNumber(2, "SizeMax", 2.0 * mesh_size)   # coarse elsewhere
-    gmsh.model.mesh.field.setNumber(2, "DistMin", (geometry_length*0.5 - inner_radius)/4)
-    gmsh.model.mesh.field.setNumber(2, "DistMax", geometry_length)  # ~3% of geometry size
-    
-    # Set background mesh size
-    gmsh.model.mesh.field.setAsBackgroundMesh(2)
-    
-    # Set P2 with linear edges
-    gmsh.model.mesh.setOrder(2)
-    gmsh.option.setNumber("Mesh.ElementOrder", 2)
-    gmsh.option.setNumber("Mesh.SecondOrderLinear", 1)  # Make the triangles straight-lined
-    gmsh.option.setNumber("Mesh.HighOrderOptimize", 0)
+    return cut_surface[1]  # Return surface tag
 
-    gmsh.model.mesh.generate(2)
 
-    gmsh.write(output_file)
-    gmsh.clear()
-    gmsh.finalize()
-
-    return
 
 def load_mesh(mesh=None, periodic=False):
     """
@@ -613,18 +568,10 @@ def load_mesh(mesh=None, periodic=False):
         else:
             print(f"ERROR! Edge appears f{count} times.")
             
-            
-    # Store pressure nodes
-    pressure_nodes = np.unique(triangles[:, :3].flatten())
+    # Pressure node info (P1 nodes only)
+    pressure_nodes = triangles[:, :3].flatten()
+    pressure_nodes = np.unique(pressure_nodes)
     pressure_index_map = {node: i for i, node in enumerate(pressure_nodes)}
-            
-    if periodic:
-        # Create periodic map, mapping masters and slaves
-        x_map = find_periodic_pairs(nodes, axis=0)
-        y_map = find_periodic_pairs(nodes, axis=1)
-        periodic_map = {**x_map, **y_map}
-    else:
-        periodic_map = {}            
 
     # Initialize mesh class
     mesh = Mesh(
@@ -638,8 +585,13 @@ def load_mesh(mesh=None, periodic=False):
         exterior_boundary_edges=exterior_boundary_edges,
         inlet_edges=inlet_edges,
         outlet_edges=outlet_edges,
-        periodic_map=periodic_map
     )
+    
+    if periodic:
+        # Create periodic map, mapping masters and slaves
+        x_map = find_periodic_pairs(nodes, axis=0)
+        y_map = find_periodic_pairs(nodes, axis=1)
+        mesh.periodic_map = {**x_map, **y_map}
     
     return mesh
 
@@ -680,20 +632,19 @@ if __name__ == "__main__":
     3. Plot the mesh with labels and edge classifications.
     
     """
-    mesh_file = "square_hole.msh"
-    periodic = True
+    mesh_file = "my_mesh.msh"
     geometry_length=0.1
-    inner_radius = geometry_length * 0.4
-    mesh_size = 0.1 * geometry_length
+    inner_radius = geometry_length * 0.2
+    mesh_size = 0.5 * geometry_length
     
     total_start = datetime.now()
 
     print("Creating mesh...", end="", flush=True)
-    create_mesh(geometry_length, mesh_size, inner_radius, output_file=mesh_file, periodic=periodic)
+    create_mesh(3, 4, geometry_length, mesh_size, inner_radius, output_file=mesh_file)
     
     print("Loading mesh...", end="", flush=True)
     raw_mesh = meshio.read(mesh_file)
-    mesh = load_mesh(raw_mesh, periodic=periodic)
+    mesh = load_mesh(raw_mesh)
     
     print("Checking mesh quality...", end="", flush=True)
     mesh.check_mesh_quality()

@@ -22,6 +22,7 @@ os.makedirs("logs", exist_ok=True)
 
 # Constants
 geometry_length = 0.001
+<<<<<<< HEAD
 
 
 
