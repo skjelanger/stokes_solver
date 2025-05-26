@@ -22,7 +22,13 @@ os.makedirs("logs", exist_ok=True)
 
 # Constants
 geometry_length = 0.001
-inner_radii = geometry_length * np.array([0.45, 0.45, 0.45, 0.45, 0.45, 0.45])
+
+
+
+
+
+
+inner_radii = geometry_length * np.array([0.35, 0.35, 0.35, 0.35, 0.35, 0.35])
 mesh_size = geometry_length * np.array([0.04, 0.008, 0.003, 0.002, 0.0014, 0.0012])
 geometry_height = 0.000091 # 91 micrometer thickness
 mu = 0.00089

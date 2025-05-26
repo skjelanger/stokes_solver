@@ -317,7 +317,7 @@ class Simulation:
             key=lambda idx: (self.mesh.nodes[idx][1] - target_y)**2 + (self.mesh.nodes[idx][0] - target_x)**2
         )
     
-        print("\rAnchoring using node: ", anchor_node, ".    ")
+        print(f"Anchoring using node: {anchor_node} at coordinates {self.mesh.nodes[anchor_node][:2]}")
     
         pressure_dof_local = self.mesh.pressure_index_map[anchor_node]
         anchor_dof_global = 2 * n + pressure_dof_local
@@ -828,7 +828,7 @@ def plot_velocity_vectors(mesh, u1, u2, title_suffix=""):
     v = u2
 
     magnitude = np.sqrt(u**2 + v**2)
-    N = min(2500, len(u))  # Number of vectors to show
+    N = min(1500, len(u))  # Number of vectors to show
     idx = np.random.choice(len(u), size=N, replace=False)
 
     # Normalize vectors for uniform length
