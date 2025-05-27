@@ -551,8 +551,8 @@ def localLoadVector2D(nodes, triangle, f):
     # Barycentric quadrature points and weights
     bary_coords = np.array([
         [1/2, 1/2, 0],
-        [0, 1/2, 1/2],
-        [1/2, 0, 1/2]
+        [0,   1/2, 1/2],
+        [1/2, 0,   1/2]
     ])
     weights = np.array([1/3, 1/3, 1/3])
 

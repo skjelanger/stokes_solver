@@ -144,7 +144,7 @@ class Mesh:
         plt.xlabel("x [mm]")
         plt.ylabel("y [mm]")
         plt.gca().set_aspect("equal")
-        plt.title("M*E*S*H*")
+        plt.title(f"Mesh with {mesh.triangles.shape[0]} elements.")
         plt.tight_layout()
         plt.savefig(filename, dpi=300)
         plt.show()
@@ -683,8 +683,8 @@ if __name__ == "__main__":
     mesh_file = "square_hole.msh"
     periodic = True
     geometry_length=1
-    inner_radius = geometry_length * 0.49
-    mesh_size = 0.0016 * geometry_length
+    inner_radius = geometry_length * 0.40
+    mesh_size = 0.1 * geometry_length
     
     total_start = datetime.now()
 
@@ -698,8 +698,7 @@ if __name__ == "__main__":
     print("Checking mesh quality...", end="", flush=True)
     mesh.check_mesh_quality()
 
-    print("Plotting mesh...", end="", flush=True)
-    #mesh.plot(show_node_ids=False, filename="mesh.png")
+    mesh.plot(show_node_ids=False, filename="mesh.png")
     
     end_mesh = datetime.now()
     print(f"\rMeshed in {(end_mesh - total_start).total_seconds():.3f} seconds")
