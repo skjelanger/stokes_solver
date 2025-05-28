@@ -1165,7 +1165,7 @@ if __name__ == "__main__":
     print(f"Checked mesh in {(check_time - load_time).total_seconds():.3f} seconds.")
 
     # Setup and run simulation
-    sim = Simulation(mesh, f, inner_radius, geometry_height, mu=mu, rho=rho, periodic_bc=periodic, nodim=True) #"periodic"
+    sim = Simulation(mesh, f, geometry_length, inner_radius, geometry_height, mu=mu, rho=rho, periodic_bc=periodic, nodim=True) #"periodic"
     print(f"Simulation parameters: {sim.get_description()}")
     sim.run()
     
