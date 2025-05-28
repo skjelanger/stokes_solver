@@ -144,7 +144,7 @@ class Mesh:
         plt.xlabel("x [mm]")
         plt.ylabel("y [mm]")
         plt.gca().set_aspect("equal")
-        plt.title(f"Mesh with {mesh.triangles.shape[0]} elements.")
+        plt.title(f"Mesh with {mesh.triangles.shape[0]} elements")
         plt.tight_layout()
         plt.savefig(filename, dpi=300)
         plt.show()

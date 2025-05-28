@@ -91,7 +91,7 @@ class Simulation:
        Estimates average permeability using average velocity and known body force.
    """
    
-    def __init__(self, mesh, f, geometry_length, inner_radius, geometry_height, mu=0.001, rho=1000.0, periodic_bc=False):
+    def __init__(self, mesh, f, geometry_length, inner_radius, geometry_height, mu=0.001, rho=1000.0, periodic_bc=False, nodim=True):
         self.mesh = mesh
         self.f = f
         self.mu = mu
@@ -100,6 +100,7 @@ class Simulation:
         self.geometry_height = geometry_height
         self.inner_radius = inner_radius
         self.periodic_bc = periodic_bc
+        self.nodim = nodim
         
         self.u1 = None
         self.u2 = None
@@ -108,6 +109,11 @@ class Simulation:
         self.rhs = None
         
     def get_description(self):
+        """
+        Returns a short string summarizing the simulation parameters 
+        (viscosity, density, mesh size, height, radius).
+        """
+        
         desc = ""
         if self.mu is not None:
             desc += f"mu={self.mu:.2e}"
@@ -123,12 +129,24 @@ class Simulation:
         return desc
         
     def save(self, filename):
+        """
+        Saves the simulation object to a compressed file using pickle and gzip.
+        """
+        
         self.lhs = None
         self.rhs = None
         with gzip.open(filename, "wb") as f:
             pickle.dump(self, f)
+            
 
     def assemble(self):
+        """
+        Assembles the global linear system (LHS matrix and RHS vector) for the Stokes problem.
+        
+        This includes building stiffness, mass, divergence, and load matrices, applying boundary
+        conditions, enforcing periodicity if enabled, and constructing the full block system.
+        """
+
         nodes = self.mesh.nodes
         triangles = self.mesh.triangles # P2 elements (6 nodes per triangle)
         pressure_nodes = self.mesh.pressure_nodes # P1 nodes (vertices)
@@ -206,6 +224,13 @@ class Simulation:
 
         
     def solve(self):
+        """
+        Solves the assembled Stokes system using the PARDISO sparse solver.
+        
+        Extracts and stores the velocity components (u1, u2) and pressure field (p),
+        and checks for residual and numerical stability.
+        """
+
         sol = pypardiso.spsolve(self.lhs, self.rhs)
         
         residual = self.lhs @ sol - self.rhs
@@ -226,6 +251,12 @@ class Simulation:
 
 
     def run(self):
+        """
+        Runs the complete simulation pipeline: assemble → debug → solve → plot.
+        
+        Measures and reports timing and residuals for each stage, and visualizes the results.
+        """
+
         total_start = datetime.now()
     
         print("Assembling system...", end="", flush=True)
@@ -257,16 +288,20 @@ class Simulation:
 
         
     def plot(self):
+        """
+        Generates and saves plots for velocity magnitude, pressure field,
+        and velocity vectors using the current solution.
+        """
+
         desc = self.get_description()
-        plot_velocity_magnitude(self.mesh, self.u1, self.u2, title_suffix=desc)
-        plot_pressure(self.mesh, self.p, title_suffix=desc)
-        plot_velocity_vectors(self.mesh, self.u1, self.u2, title_suffix=desc) 
+        plot_velocity_magnitude(self.mesh, self.u1, self.u2, title_suffix=desc, nodim = nodim)
+        plot_pressure(self.mesh, self.p, title_suffix=desc, nodim = nodim)
+        plot_velocity_vectors(self.mesh, self.u1, self.u2, title_suffix=desc, nodim = nodim) 
 
         
     def apply_periodic_bc(self):
         """
-        Vectorized version:
-        - No-slip condition on wall nodes (u1 = u2 = 0)
+        - No-slip condition on interior wall nodes
         - Pressure anchoring at one pressure node
         """
         n = self.mesh.nodes.shape[0]
@@ -462,8 +497,13 @@ class Simulation:
             area_weighted_velocity += triangle_velocity
     
         self.avg_velocity = area_weighted_velocity 
-        self.k = (2 / 3) * (0.001**2) * abs(self.avg_velocity)
-    
+        
+        if self.nodim:
+            self.k = (2 / 3) * (0.001**2) * abs(self.avg_velocity)
+            
+        else:
+            self.k = (2 / 3) * abs(self.avg_velocity)
+
         print(f"Avg y-velocity: {self.avg_velocity:.4e} m/s")
         print(f"Permeability: {self.k:.4e} m²")
         
@@ -494,7 +534,7 @@ def LoadAssembler2D(nodes, triangles, f, periodic_map):
     triangles : ndarray of shape (n_elements, 6)
         Connectivity array, where each row contains 6 node indices of a P2 triangle.
 
-    function : callable
+    f : callable
         A function f(x, y) defining the source term of the PDE.
 
     Returns
@@ -586,7 +626,7 @@ def StiffnessAssembler2D(nodes, triangles, periodic_map):
 
     Returns
     -------
-    A : ndarray of shape (n_nodes, n_nodes)
+    A : scipy.sparse.lil_matrix
         Global stiffness matrix.
     """
     n_nodes = nodes.shape[0]
@@ -758,15 +798,16 @@ def DivergenceAssembler2D(nodes, triangles, pressure_nodes, pressure_index_map, 
     nodes : ndarray of shape (n_nodes, 3)
         Node coordinates.
 
-    triangle : array-like of shape (6,)
-        Indices of the 6 nodes forming the P2 triangle.
+    triangles : ndarray of shape (n_elements, 6)
+        Triangle connectivity for P2 velocity elements.
     
     pressure_nodes : ndarray of shape (n_p_nodes, 3)
            Pressure node coordinates.     
 
     Returns
     -------
-    B1, B2
+    -B1, -B2 :  scipy.sparse.lil_matrix
+                Global divergence matrices.
     """
     
     n_p = len(pressure_nodes)
@@ -853,21 +894,39 @@ def localDivergenceMatrix2D(nodes, triangle):
 
     return B1_local, B2_local 
 
-def plot_velocity_magnitude(mesh, u1, u2, title_suffix=""):
+def plot_velocity_magnitude(mesh, u1, u2, title_suffix="", nodim=False):
     magnitude = np.sqrt(u1**2 + u2**2)
     plt.figure(figsize=(6, 5), dpi=300)
     triangles_P1 = mesh.triangles[:, :3]
+    
+    
     if mesh.triangles.shape[0] > 10000:
         edgecolor = 'none'
     else:
         edgecolor = 'k'
-    t = mtri.Triangulation(mesh.nodes[:, 0] *1000, mesh.nodes[:, 1]*1000, triangles_P1) # Scaling from m to mm
+        
+    if nodim:
+        nodesx = mesh.nodes[:, 0]
+        nodesy = mesh.nodes[:, 1]
+    else:
+        nodesx = mesh.nodes[:, 0] *1000
+        nodesy = mesh.nodes[:, 1]*1000
+        
+    t = mtri.Triangulation(nodesx, nodesy, triangles_P1) # Scaling from m to mm
     plt.tripcolor(t, magnitude, shading='flat', cmap='viridis', edgecolors=edgecolor, linewidth=0.1)
     
-    plt.title(f"Velocity Magnitude [m/s]\n{title_suffix}\n ", fontsize=10)
-    plt.xlabel("x [mm]")
-    plt.ylabel("y [mm]")
-    plt.colorbar(label=r"$|u|$ [m/s]")
+    if nodim:
+        plt.xlabel("$y_1$")
+        plt.ylabel("$y_2$")
+        plt.colorbar(label=r"$|\vec w|$ ")
+        plt.title(f"Velocity response \n{title_suffix}\n", fontsize=10)
+
+    else:
+        plt.xlabel("x [mm]")
+        plt.ylabel("y [mm]")
+        plt.colorbar(label=r"$|u|$ [m/s]")
+        plt.title(f"Velocity Magnitude [m/s]\n{title_suffix}\n ", fontsize=10)
+    
     plt.tight_layout()
 
     # Save figure
@@ -882,7 +941,7 @@ def plot_velocity_magnitude(mesh, u1, u2, title_suffix=""):
 
     return magnitude
     
-def plot_pressure(mesh, pressure, title_suffix=""):
+def plot_pressure(mesh, pressure, title_suffix="", nodim=False):
     plt.figure(figsize=(6, 5), dpi=300)
     vertex_coords = mesh.nodes[mesh.pressure_nodes] 
     old_to_new = {old: new for new, old in enumerate(mesh.pressure_nodes)}
@@ -891,17 +950,34 @@ def plot_pressure(mesh, pressure, title_suffix=""):
         for tri in mesh.triangles
         if all(i in old_to_new for i in tri[:3])
     ])
+    
     if mesh.triangles.shape[0] > 10000:
         edgecolor = 'none'
     else:
         edgecolor = 'k'
-    t = mtri.Triangulation(vertex_coords[:, 0]*1000, vertex_coords[:, 1]*1000, triangles_p1) # Scaling from m to mm
+        
+    if nodim:
+        coordsx = vertex_coords[:, 0]
+        coordsy = vertex_coords[:, 1]
+    else:
+        coordsx = vertex_coords[:, 0]*1000
+        coordsy = vertex_coords[:, 1]*1000
+        
+    t = mtri.Triangulation(coordsx, coordsy, triangles_p1) # Scaling from m to mm
     plt.tripcolor(t, pressure, shading='gouraud', cmap='coolwarm', edgecolors=edgecolor)
+        
+    if nodim:
+        plt.xlabel("$y_1$")
+        plt.ylabel("$y_2$")
+        plt.colorbar(label=r"$p$")
+        plt.title(f"Pressure response\n{title_suffix}\n", fontsize=10)  
+
+    else:
+        plt.xlabel("x [mm]")
+        plt.ylabel("y [mm]")
+        plt.colorbar(label=r"$p$ [Pa]")
+        plt.title(f"Pressure Field [Pa]\n{title_suffix}\n ", fontsize=10)
     
-    plt.title(f"Pressure Field (P1) [Pa]\n{title_suffix}\n ", fontsize=10)
-    plt.colorbar(label=r"$p$ [Pa]")
-    plt.xlabel("x [mm]")
-    plt.ylabel("y [mm]")
     plt.gca().set_aspect("equal")
     plt.tight_layout()
 
@@ -914,18 +990,19 @@ def plot_pressure(mesh, pressure, title_suffix=""):
     print(f"Min pressure: {np.min(pressure):.4e} Pa")
     return
 
-def plot_velocity_vectors(mesh, u1, u2, title_suffix=""):
+def plot_velocity_vectors(mesh, u1, u2, title_suffix="", nodim=False):
     """
-    Plot velocity vectors at uniformly spaced points, excluding ones too far from the mesh.
+    Plot velocity vectors at uniformly spaced points.
 
-    Parameters:
-    -----------
-    max_distance : float
-        Maximum allowed distance (in mm) from a grid point to a mesh node. 
-        Grid points farther than this are ignored.
     """
-    x = mesh.nodes[:, 0] * 1000  # mm
-    y = mesh.nodes[:, 1] * 1000
+    
+    if nodim:
+        x = mesh.nodes[:, 0]
+        y = mesh.nodes[:, 1]
+    else:
+        x = mesh.nodes[:, 0] * 1000  # mm
+        y = mesh.nodes[:, 1] * 1000
+        
     u = u1
     v = u2
     magnitude = np.sqrt(u**2 + v**2)
@@ -964,10 +1041,17 @@ def plot_velocity_vectors(mesh, u1, u2, title_suffix=""):
         cmap='viridis'
     )
 
-    plt.colorbar(quiv, label='Velocity Magnitude [m/s]')
-    plt.title(f"Velocity Direction (colored by magnitude)\n{title_suffix}\n", fontsize=10)
-    plt.xlabel("x [mm]")
-    plt.ylabel("y [mm]")
+    if nodim:
+        plt.colorbar(quiv, label='Magnitude')
+        plt.xlabel("$y_1$")
+        plt.ylabel("$y_2$")
+        plt.title(f"Velocity Direction\n{title_suffix}\n", fontsize=10)
+    else:
+        plt.colorbar(quiv, label='Velocity Magnitude [m/s]')
+        plt.xlabel("x [mm]")
+        plt.ylabel("y [mm]")
+        plt.title(f"Velocity Direction (colored by magnitude)\n{title_suffix}\n", fontsize=10)
+    
     plt.gca().set_aspect("equal")
     plt.tight_layout()
 
@@ -976,7 +1060,7 @@ def plot_velocity_vectors(mesh, u1, u2, title_suffix=""):
     plt.show()
     plt.close()
     
-def load_simulation(filename):
+def load_simulation(filepath):
     """
     Load a Simulation object from a pickle file.
 
@@ -990,11 +1074,11 @@ def load_simulation(filename):
     sim : Simulation
         Loaded Simulation object.
     """
-    filepath = f'simulations/{filename}'
+    #filepath = f'simulations/{filename}'
     
     with gzip.open(filepath, "rb") as f:
         sim = pickle.load(f)
-    print(f"Loaded simulation from '{filename}'")
+    print(f"Loaded simulation from '{filepath}'")
     return sim
     
 @njit
@@ -1056,6 +1140,7 @@ if __name__ == "__main__":
     rho = 1# 1000.0 # Density kg/m^3
     
     periodic = True
+    nodim = True
     
     # Body forces
     def f(x, y):
@@ -1080,7 +1165,7 @@ if __name__ == "__main__":
     print(f"Checked mesh in {(check_time - load_time).total_seconds():.3f} seconds.")
 
     # Setup and run simulation
-    sim = Simulation(mesh, f, geometry_length, inner_radius, geometry_height, mu=mu, rho=rho, periodic_bc=periodic) #"periodic"
+    sim = Simulation(mesh, f, inner_radius, geometry_height, mu=mu, rho=rho, periodic_bc=periodic, nodim=True) #"periodic"
     print(f"Simulation parameters: {sim.get_description()}")
     sim.run()
     
