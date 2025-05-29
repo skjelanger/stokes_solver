@@ -29,7 +29,7 @@ Install the following Python packages (e.g., via pip or conda):
 - `pypardiso` *(or switch to another solver manually if needed)*
 
 ## Running the Stokes Solver
-###To execute a simulation:
+### To execute a simulation:
 
 1. Download stokes_solver.py and mesher.py.
 2. Install the required dependencies listed above.
@@ -39,7 +39,7 @@ bash
 python stokes_solver.py
 bash
 
-###This will:
+### This will:
 
 1. Generate a mesh using Gmsh.
 2. Assemble and solve the Stokes system using P2-P1 mixed finite elements.
@@ -48,7 +48,7 @@ bash
 5. Compute the permeability.
 6. Save the entire simulation state (solution + mesh + metadata) as a compressed file under simulations/.
 
-###Output
+### Output
 - Figures are saved to the plots/ folder as .png files.
 - Full simulation results are saved as .pkl.gz files under simulations/.
 
