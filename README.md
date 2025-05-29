@@ -28,6 +28,32 @@ Install the following Python packages (e.g., via pip or conda):
 - `matplotlib`
 - `pypardiso` *(or switch to another solver manually if needed)*
 
+## Running the Stokes Solver
+###To execute a simulation:
+
+1. Download stokes_solver.py and mesher.py.
+2. Install the required dependencies listed above.
+3. Run the main solver script:
+
+bash
+python stokes_solver.py
+bash
+
+###This will:
+
+1. Generate a mesh using Gmsh.
+2. Assemble and solve the Stokes system using P2-P1 mixed finite elements.
+3. Apply periodic or inflow/outflow boundary conditions (as configured).
+4. Plot and save the velocity magnitude, velocity vectors, and pressure fields.
+5. Compute the permeability.
+6. Save the entire simulation state (solution + mesh + metadata) as a compressed file under simulations/.
+
+###Output
+- Figures are saved to the plots/ folder as .png files.
+- Full simulation results are saved as .pkl.gz files under simulations/.
+
+You can modify mesh parameters and boundary settings directly in the __main__ section at the bottom of stokes_solver.py.
+
 ## Notes
 Periodic boundary conditions are applied at the matrix level via slave-master DOF enforcement.
 
