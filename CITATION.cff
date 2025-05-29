@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Finite Element Solver in Python for 2D Stokes flow"
+version: "1.0.0"
+authors:
+  - family-names: "Skjelanger"
+    given-names: "Kristoffer"
+date-released: 2025-05-29
+repository-code: "https://github.com/skjelanger/stokes_solver"
+license: "MIT"
+keywords:
+  - stokes flow
+  - CFD
+  - numerical methods
+  - finite element
