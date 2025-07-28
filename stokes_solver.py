@@ -369,44 +369,30 @@ class Simulation:
     
     
     def apply_inflow_outflow_bc(self):
-        """
-        Applies:
-        - No-slip condition on wall nodes (Dirichlet on velocity)
-        - Dirichlet pressure BCs: high pressure at inlet, low at outlet
-        """
-        n = self.mesh.nodes.shape[0]
-        lhs = self.lhs.tolil()
-        rhs = self.rhs
-        
-        wall_nodes = np.unique(np.array(self.mesh.wall_edges).flatten())
-        inlet_nodes = np.unique(np.array(self.mesh.inlet_edges).flatten())
-        outlet_nodes = np.unique(np.array(self.mesh.outlet_edges).flatten())
-        
-        inlet_corner_nodes = np.intersect1d(inlet_nodes, wall_nodes)
-        outlet_corner_nodes = np.intersect1d(outlet_nodes, wall_nodes)
-        conflicting_nodes = np.union1d(inlet_corner_nodes, outlet_corner_nodes)
-        
-        outlet_nodes = np.setdiff1d(outlet_nodes, conflicting_nodes)
-        inlet_nodes = np.setdiff1d(inlet_nodes, conflicting_nodes)
+        n = len(self.mesh.nodes)
+        lhs, rhs = self.lhs.tolil(), self.rhs
     
-        # --- No-slip on wall nodes ---
-        for node in wall_nodes:
-            for comp in [0, 1]:  # u1, u2
-                dof = node + comp * n
-                apply_dirichlet_bc(lhs, rhs, dof, 0.0)
+        wall_all   = set(np.unique(self.mesh.wall_edges))
+        inlet_all  = set(np.unique(self.mesh.inlet_edges))
+        outlet_all = set(np.unique(self.mesh.outlet_edges))
     
-        # --- Dirichlet pressure at outlet ---
-        target_y = 0 * np.max(self.mesh.nodes[:, 1])
-        target_x = 0.5 * np.max(self.mesh.nodes[:, 0])
-        
-        outlet_pressure_nodes = [i for i in outlet_nodes if i in self.mesh.pressure_index_map]
-        if not outlet_pressure_nodes:
-            raise RuntimeError("No pressure nodes found on outlet.")
-        outlet_node = min(outlet_pressure_nodes, key=lambda idx: (self.mesh.nodes[idx][1] - target_y)**2 + (self.mesh.nodes[idx][0] - target_x)**2)
-        pressure_dof_local = self.mesh.pressure_index_map[outlet_node]
-        apply_dirichlet_bc(lhs, rhs, 2 * n + pressure_dof_local, 0)
+        # no‐slip on the walls
+        for node in wall_all:
+            apply_dirichlet_bc(lhs, rhs, node     , 0.0)
+            apply_dirichlet_bc(lhs, rhs, node + n , 0.0)
+    
+        # pressure at inlet
+        for node in inlet_all:
+            pidx = 2*n + self.mesh.pressure_index_map[node]
+            apply_dirichlet_bc(lhs, rhs, pidx, 1.0)     # p_inlet = 1
+    
+        for node in outlet_all:
+            pidx = 2*n + self.mesh.pressure_index_map[node]
+            apply_dirichlet_bc(lhs, rhs, pidx, -1.0)     # p_outlet = 0
+    
+        self.lhs, self.rhs = lhs.tocsr(), rhs
 
-
+    
     def debug_system(self, tol=1e-12):
         """
         Debugs the assembled linear system by checking:
@@ -496,13 +482,14 @@ class Simulation:
     
             area_weighted_velocity += triangle_velocity
     
-        self.avg_velocity = area_weighted_velocity 
+        self.avg_velocity = area_weighted_velocity / self.geometry_length**2
+        b_mag = abs(self.f(0,0)[1])
         
         if self.nodim:
-            self.k = (2 / 3) * (0.001**2) * abs(self.avg_velocity)
+            self.k = (2 / 3) * (0.001**2) * abs(self.avg_velocity) / b_mag
             
         else:
-            self.k = (2 / 3) * abs(self.avg_velocity)
+            self.k = (2 / 3) * self.mu * abs(self.avg_velocity) / b_mag
 
         print(f"Avg y-velocity: {self.avg_velocity:.4e} m/s")
         print(f"Permeability: {self.k:.4e} m²")
@@ -1131,20 +1118,31 @@ if __name__ == "__main__":
     os.makedirs("plots", exist_ok=True)
     os.makedirs("simulations", exist_ok=True)
     
-    # Define constants
-    geometry_length = 1 # meters 0.001 is 1mm
-    mesh_size = geometry_length * 0.05 # meters
-    inner_radius = geometry_length * 0.40
-    geometry_height = 0.091 # 91 micrometer thickness
-    mu = 1# 0.00089 # Viscosity Pa*s
-    rho = 1# 1000.0 # Density kg/m^3
-    
     periodic = True
     nodim = True
     
+    # Geometry parameters
+    if nodim:
+        geometry_length = 1 # meters 0.001 is 1mm
+        geometry_height = 0.091 # 91 micrometer thickness
+        mu = 1#0.00089 # Viscosity Pa*s
+        rho = 1#1000.0 # Density kg/m^3
+        g = 1 # m/s^2
+        
+    else:
+        geometry_length = 0.001 # meters 0.001 is 1mm
+        geometry_height = 0.000091 # 91 micrometer thickness
+        mu = 0.00089 # Viscosity Pa*s
+        rho = 1000.0 # Density kg/m^3
+        g = 9.81 # m/s^2
+        
+    # Mesh parameters
+    mesh_size = geometry_length * 0.02 # meters
+    inner_radius = geometry_length * 0.40
+    
     # Body forces
     def f(x, y):
-        return (0, -1) # Body force wtih units N/m^3
+        return (0, -rho*g) # Body force wtih units N/m^3
 
     # Create mesh
     mesh_start = datetime.now()
@@ -1165,7 +1163,7 @@ if __name__ == "__main__":
     print(f"Checked mesh in {(check_time - load_time).total_seconds():.3f} seconds.")
 
     # Setup and run simulation
-    sim = Simulation(mesh, f, geometry_length, inner_radius, geometry_height, mu=mu, rho=rho, periodic_bc=periodic, nodim=True) #"periodic"
+    sim = Simulation(mesh, f, geometry_length, inner_radius, geometry_height, mu=mu, rho=rho, periodic_bc=periodic, nodim=nodim) #"periodic"
     print(f"Simulation parameters: {sim.get_description()}")
     sim.run()
     

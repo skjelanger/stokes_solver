@@ -130,11 +130,11 @@ class Mesh:
                 plt.plot(x_vals, y_vals, color, linewidth=1.2, label=label)
     
         draw_edges(self.interior_edges, 'C0', 'Interior')
-        draw_edges(self.interior_boundary_edges, 'C1', 'Interior wall')
-        draw_edges(self.exterior_boundary_edges, 'C2', 'Periodic BC')
-        #draw_edges(self.inlet_edges, 'C1', 'Inlet')
-        #draw_edges(self.outlet_edges, 'C2', 'Outlet')
-        #draw_edges(self.wall_edges, 'C3', 'Wall')
+        #draw_edges(self.interior_boundary_edges, 'C1', 'Interior wall')
+        #draw_edges(self.exterior_boundary_edges, 'C2', 'Periodic BC')
+        draw_edges(self.inlet_edges, 'C1', 'Inlet')
+        draw_edges(self.outlet_edges, 'C2', 'Outlet')
+        draw_edges(self.wall_edges, 'C3', 'Wall')
 
         # Remove duplicate labels
         handles, labels = plt.gca().get_legend_handles_labels()
@@ -681,10 +681,10 @@ if __name__ == "__main__":
     
     """
     mesh_file = "square_hole.msh"
-    periodic = True
+    periodic = False
     geometry_length=1
-    inner_radius = geometry_length * 0.40
-    mesh_size = 0.1 * geometry_length
+    inner_radius = geometry_length * 0.35
+    mesh_size = 0.2 * geometry_length
     
     total_start = datetime.now()
 
