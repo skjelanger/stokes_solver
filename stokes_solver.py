@@ -206,7 +206,7 @@ class Simulation:
         if self.periodic_bc:
             self.apply_periodic_bc()
         else:
-            self.apply_inflow_outflow_bc()     
+            self.apply_bc()     
             
         # Convert to scr for faster solve.
         self.lhs = self.lhs.tocsr()
@@ -368,28 +368,31 @@ class Simulation:
         apply_dirichlet_bc(lhs, rhs, anchor_dof, 0.0)
     
     
-    def apply_inflow_outflow_bc(self):
+    def apply_bc(self):
         n = len(self.mesh.nodes)
         lhs, rhs = self.lhs.tolil(), self.rhs
     
-        wall_all   = set(np.unique(self.mesh.wall_edges))
-        inlet_all  = set(np.unique(self.mesh.inlet_edges))
-        outlet_all = set(np.unique(self.mesh.outlet_edges))
+        # no‐slip on the side walls:
+        wall_nodes = np.unique(np.array(self.mesh.wall_edges).flatten())
+        for i in wall_nodes:
+            apply_dirichlet_bc(lhs, rhs,  i    , 0.0)  # u_x = 0
+            apply_dirichlet_bc(lhs, rhs,  i + n, 0.0)  # u_y = 0
     
-        # no‐slip on the walls
-        for node in wall_all:
-            apply_dirichlet_bc(lhs, rhs, node     , 0.0)
-            apply_dirichlet_bc(lhs, rhs, node + n , 0.0)
+        # flatten inlet/outlet edges → unique nodes
+        inlet_nodes  = np.unique(np.array(self.mesh.inlet_edges).flatten())
+        outlet_nodes = np.unique(np.array(self.mesh.outlet_edges).flatten())
     
-        # pressure at inlet
-        for node in inlet_all:
-            pidx = 2*n + self.mesh.pressure_index_map[node]
-            apply_dirichlet_bc(lhs, rhs, pidx, 1.0)     # p_inlet = 1
+        # pressure at inlet = 1
+        for i in inlet_nodes:
+            p_dof = 2*n + self.mesh.pressure_index_map[i]
+            apply_dirichlet_bc(lhs, rhs, p_dof, 1.0)
     
-        for node in outlet_all:
-            pidx = 2*n + self.mesh.pressure_index_map[node]
-            apply_dirichlet_bc(lhs, rhs, pidx, -1.0)     # p_outlet = 0
+        # pressure at outlet = 0
+        for i in outlet_nodes:
+            p_dof = 2*n + self.mesh.pressure_index_map[i]
+            apply_dirichlet_bc(lhs, rhs, p_dof, 0.0)
     
+        # convert back
         self.lhs, self.rhs = lhs.tocsr(), rhs
 
     
@@ -1118,7 +1121,7 @@ if __name__ == "__main__":
     os.makedirs("plots", exist_ok=True)
     os.makedirs("simulations", exist_ok=True)
     
-    periodic = True
+    periodic = False
     nodim = True
     
     # Geometry parameters
