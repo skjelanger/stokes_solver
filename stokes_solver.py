@@ -1140,7 +1140,7 @@ if __name__ == "__main__":
     else:
         geometry_length = 1 # meters 0.001 is 1mm
         geometry_width = geometry_length # meters 0.001 is 1mm
-        geometry_height = 0.091 # 91 micrometer thickness
+        geometry_height = 0.000091 # 91 micrometer thickness
         mu = 0.00089 # Viscosity Pa*s
         rho = 1000.0 # Density kg/m^3
         g = 9.81 # m/s^2
@@ -1157,8 +1157,8 @@ if __name__ == "__main__":
     mesh_start = datetime.now()
     
     if tiled:
-        nrows = 5
-        ncols = 3
+        nrows = 10
+        ncols = 6
         create_tiled_mesh(geometry_length, mesh_size, inner_radius, "square_with_hole.msh", periodic=periodic, nrows=nrows, ncols=ncols)
         geometry_length = geometry_length * nrows
         geometry_width = geometry_width * ncols
