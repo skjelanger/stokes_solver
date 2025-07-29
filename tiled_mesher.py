@@ -129,10 +129,11 @@ class Mesh:
                 plt.plot(x_vals, y_vals, color, linewidth=1.2, label=label)
     
         draw_edges(self.interior_edges, 'C0', 'Interior')
-        draw_edges(self.interior_boundary_edges, 'C1', 'Interior wall')
-        draw_edges(self.exterior_boundary_edges, 'C2', 'Periodic BC')
-        #draw_edges(self.inlet_edges, 'C3', 'Inlet')
-        #draw_edges(self.outlet_edges, 'C4', 'Outlet')
+        #draw_edges(self.interior_boundary_edges, 'C1', 'Interior wall')
+        #draw_edges(self.exterior_boundary_edges, 'C2', 'Periodic BC')
+        draw_edges(self.inlet_edges, 'C1', 'Inlet')
+        draw_edges(self.outlet_edges, 'C2', 'Outlet')
+        draw_edges(self.wall_edges, 'C3', 'Wall')
 
         # Remove duplicate labels
         handles, labels = plt.gca().get_legend_handles_labels()
@@ -396,14 +397,14 @@ class Mesh:
         print(f"Saved velocity node plot to {filename}.")
     
 
-def create_mesh(n, m, geometry_length=0.01, mesh_size=0.0001, inner_radius=0.004, output_file="tiled_mesh.msh", periodic=False):
+def create_tiled_mesh(geometry_length=0.01, mesh_size=0.0001, inner_radius=0.004, output_file="tiled_mesh.msh", periodic=False, nrows=5, ncols=3):
     gmsh.initialize()
     gmsh.model.add("tiled_mesh")
 
     all_surfaces = []
 
-    for i in range(n):
-        for j in range(m):
+    for i in range(ncols):
+        for j in range(nrows):
             dx = i * geometry_length
             dy = j * geometry_length
 
@@ -476,7 +477,7 @@ def _add_unit_cell(dx, dy, l, r, mesh_size):
 
 
 
-def load_mesh(mesh=None, periodic=False):
+def load_tiled_mesh(mesh=None, periodic=False):
     """
     Load a mesh from file or memory and classify its edges.
 
@@ -532,6 +533,9 @@ def load_mesh(mesh=None, periodic=False):
     inlet_edges = []
     outlet_edges = []
     wall_edges = []
+    
+    x_min, x_max = nodes[:,0].min(), nodes[:,0].max()
+    y_min, y_max = nodes[:,1].min(), nodes[:,1].max()
 
     for edge, count in edge_list.items():
         if count == 1:  # boundary edge
@@ -540,11 +544,9 @@ def load_mesh(mesh=None, periodic=False):
             x1, x2 = p1[0], p2[0]
             y1, y2 = p1[1], p2[1]
 
-            xmax = np.max(nodes)
-            xmin = np.min(nodes)
-            if np.isclose(y1, xmax) and np.isclose(y2, xmax):
+            if np.isclose(y1, y_max) and np.isclose(y2, y_max):
                 inlet_edges.append(edge)  # Top → inflow
-            elif np.isclose(y1, xmin) and np.isclose(y2, xmin):
+            elif np.isclose(y1, y_min) and np.isclose(y2, y_min):
                 outlet_edges.append(edge)  # Bottom → outflow
             else:
                 wall_edges.append(edge)
@@ -640,11 +642,11 @@ if __name__ == "__main__":
     total_start = datetime.now()
 
     print("Creating mesh...", end="", flush=True)
-    create_mesh(3, 4, geometry_length, mesh_size, inner_radius, output_file=mesh_file)
+    create_tiled_mesh(geometry_length, mesh_size, inner_radius, output_file=mesh_file, nrows=3, ncols=5)
     
     print("Loading mesh...", end="", flush=True)
     raw_mesh = meshio.read(mesh_file)
-    mesh = load_mesh(raw_mesh)
+    mesh = load_tiled_mesh(raw_mesh)
     
     print("Checking mesh quality...", end="", flush=True)
     mesh.check_mesh_quality()

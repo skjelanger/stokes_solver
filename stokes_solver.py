@@ -19,6 +19,7 @@ import scipy.sparse as sp
 from scipy.spatial import cKDTree
 
 from mesher import create_mesh, load_mesh
+from tiled_mesher import create_tiled_mesh, load_tiled_mesh
 from datetime import datetime
 
 import pypardiso
@@ -91,12 +92,13 @@ class Simulation:
        Estimates average permeability using average velocity and known body force.
    """
    
-    def __init__(self, mesh, f, geometry_length, inner_radius, geometry_height, mu=0.001, rho=1000.0, periodic_bc=False, nodim=True):
+    def __init__(self, mesh, f, geometry_length, geometry_width, inner_radius, geometry_height, mu=0.001, rho=1000.0, periodic_bc=False, nodim=True):
         self.mesh = mesh
         self.f = f
         self.mu = mu
         self.rho = rho
         self.geometry_length= geometry_length
+        self.geometry_width= geometry_width
         self.geometry_height = geometry_height
         self.inner_radius = inner_radius
         self.periodic_bc = periodic_bc
@@ -170,7 +172,7 @@ class Simulation:
         
         # Combine mass ad stiffness matrix,
         A11 = (A * self.mu ) + (alpha * M)
-
+        
         end_matrices = datetime.now()
         print(f"\rAssembled matrices in {(end_matrices - start_matrices).total_seconds():.3f} seconds.")
         
@@ -222,7 +224,7 @@ class Simulation:
         # Clean up intermediate matrices to save memory
         del A, M, B1, B2, B1T, B2T, A11
 
-        
+
     def solve(self):
         """
         Solves the assembled Stokes system using the PARDISO sparse solver.
@@ -380,19 +382,18 @@ class Simulation:
     
         # 2) velocity inlet (e.g. parabolic in y‐direction)
         inlet_nodes = np.unique(np.array(self.mesh.inlet_edges).flatten())
-        L = self.geometry_length
+        L = self.geometry_width
         Umax = 1.0
         for i in inlet_nodes:
             xi = self.mesh.nodes[i,0]
             v_in = -Umax*(1 - ((xi - L/2)/(L/2))**2)
-            apply_dirichlet_bc(lhs, rhs, i    , 0.0)   # u_x = 0
+            apply_dirichlet_bc(lhs, rhs, i    , 0)   # u_x = 0
             apply_dirichlet_bc(lhs, rhs, i + n, v_in)  # u_y = v_in
     
-        # 3) pressure outlet (set p=0 on outlet nodes)
-        outlet_nodes = np.unique(np.array(self.mesh.outlet_edges).flatten())
-        for i in outlet_nodes:
-            pdof = 2*n + self.mesh.pressure_index_map[i]
-            apply_dirichlet_bc(lhs, rhs, pdof, 0.0)
+        # Do nothing outlet, fix prssure at one node
+        outlet_node = np.unique(np.array(self.mesh.outlet_edges).flatten())[0]
+        pdof = 2*n + self.mesh.pressure_index_map[outlet_node]
+        apply_dirichlet_bc(lhs, rhs, pdof, 0.0)
     
         # now back to CSR
         self.lhs, self.rhs = lhs.tocsr(), rhs
@@ -500,10 +501,10 @@ class Simulation:
         print(f"Permeability: {self.k:.4e} m²")
         
         return self.k
-
+    
 def apply_dirichlet_bc(lhs, rhs, dof, value):
+    # zero only the *row*
     lhs[dof, :] = 0.0
-    lhs[:, dof] = 0.0
     lhs[dof, dof] = 1.0
     rhs[dof] = value
 
@@ -553,7 +554,7 @@ def localLoadVector2D(nodes, triangle, f):
     Calculates the local load vector for a single P2 triangle using 3-point 
     barycentric quadrature.
 
-    The function evaluates the integral of f(x, y) * φ_i(x, y) over the triangle using 
+    The function evaluates the integral of f(x, y) * phi_i(x, y) over the triangle using 
     quadratic (P2) basis functions and returns the result as a local load vector.
 
     Parameters
@@ -839,10 +840,10 @@ def localDivergenceMatrix2D(nodes, triangle):
       Returns
       -------
       B1_local : ndarray of shape (3, 6)
-          Local matrix of ∂φ_j/∂x tested against pressure basis functions.
+          Local matrix of ∂phi_j/∂x tested against pressure basis functions.
     
       B2_local : ndarray of shape (3, 6)
-          Local matrix of ∂φ_j/∂y tested against pressure basis functions.
+          Local matrix of ∂phi_j/∂y tested against pressure basis functions.
       """
     coords = nodes[triangle][:, :2]  # shape: (6, 2)
     v0, v1, v2 = coords[:3]
@@ -1123,41 +1124,54 @@ if __name__ == "__main__":
     os.makedirs("plots", exist_ok=True)
     os.makedirs("simulations", exist_ok=True)
     
-    periodic = False
-    nodim = False
+    periodic = True
+    nodim = True
+    tiled = True
     
     # Geometry parameters
     if nodim:
         geometry_length = 1 # meters 0.001 is 1mm
+        geometry_width = geometry_length # meters 0.001 is 1mm
         geometry_height = 0.091 # 91 micrometer thickness
         mu = 1#0.00089 # Viscosity Pa*s
         rho = 1#1000.0 # Density kg/m^3
         g = 1 # m/s^2
         
     else:
-        geometry_length = 0.001 # meters 0.001 is 1mm
-        geometry_height = 0.0091 # 91 micrometer thickness
+        geometry_length = 1 # meters 0.001 is 1mm
+        geometry_width = geometry_length # meters 0.001 is 1mm
+        geometry_height = 0.091 # 91 micrometer thickness
         mu = 0.00089 # Viscosity Pa*s
         rho = 1000.0 # Density kg/m^3
         g = 9.81 # m/s^2
         
     # Mesh parameters
-    mesh_size = geometry_length * 0.02 # meters
-    inner_radius = geometry_length * 0.40
+    mesh_size = geometry_length * 0.05 # meters
+    inner_radius = geometry_length * 0.4
     
     # Body forces
     def f(x, y):
-        return (0, 0) # Body force with units N/m^3
+        return (0, -1) # Body force with units N/m^3
 
     # Create mesh
     mesh_start = datetime.now()
-    #create_mesh(3,4,geometry_length, mesh_size, inner_radius, "square_with_hole.msh", periodic=periodic)
-    create_mesh(geometry_length, mesh_size, inner_radius, "square_with_hole.msh", periodic=periodic)
+    
+    if tiled:
+        nrows = 5
+        ncols = 3
+        create_tiled_mesh(geometry_length, mesh_size, inner_radius, "square_with_hole.msh", periodic=periodic, nrows=nrows, ncols=ncols)
+        geometry_length = geometry_length * nrows
+        geometry_width = geometry_width * ncols
+    else:
+        create_mesh(geometry_length, mesh_size, inner_radius, "square_with_hole.msh", periodic=periodic)
     mesh_time = datetime.now()
     print(f"Created mesh in in {(mesh_time - mesh_start).total_seconds():.3f} seconds.")
 
     raw_mesh = meshio.read("square_with_hole.msh")
-    mesh = load_mesh(raw_mesh, periodic)
+    if tiled:    
+        mesh = load_tiled_mesh(raw_mesh, periodic)
+    else:
+        mesh = load_mesh(raw_mesh, periodic)
     mesh.mesh_size = mesh_size  # manually attach it
     load_time = datetime.now()
     print(f"Mesh loaded: {mesh.triangles.shape[0]} P2 elements, {mesh.nodes.shape[0]} P2 nodes.")
@@ -1168,7 +1182,7 @@ if __name__ == "__main__":
     print(f"Checked mesh in {(check_time - load_time).total_seconds():.3f} seconds.")
 
     # Setup and run simulation
-    sim = Simulation(mesh, f, geometry_length, inner_radius, geometry_height, mu=mu, rho=rho, periodic_bc=periodic, nodim=nodim) #"periodic"
+    sim = Simulation(mesh, f, geometry_length, geometry_width, inner_radius, geometry_height, mu=mu, rho=rho, periodic_bc=periodic, nodim=nodim) #"periodic"
     print(f"Simulation parameters: {sim.get_description()}")
     sim.run()
     
