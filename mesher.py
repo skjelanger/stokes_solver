@@ -577,6 +577,9 @@ def load_mesh(mesh=None, periodic=False):
     inlet_edges = []
     outlet_edges = []
     wall_edges = []
+    
+    x_min, x_max = nodes[:,0].min(), nodes[:,0].max()
+    y_min, y_max = nodes[:,1].min(), nodes[:,1].max()
 
     for edge, count in edge_list.items():
         if count == 1:  # boundary edge
@@ -585,11 +588,9 @@ def load_mesh(mesh=None, periodic=False):
             x1, x2 = p1[0], p2[0]
             y1, y2 = p1[1], p2[1]
 
-            xmax = np.max(nodes)
-            xmin = np.min(nodes)
-            if np.isclose(y1, xmax) and np.isclose(y2, xmax):
+            if np.isclose(y1, y_max) and np.isclose(y2, y_max):
                 inlet_edges.append(edge)  # Top → inflow
-            elif np.isclose(y1, xmin) and np.isclose(y2, xmin):
+            elif np.isclose(y1, y_min) and np.isclose(y2, y_min):
                 outlet_edges.append(edge)  # Bottom → outflow
             else:
                 wall_edges.append(edge)

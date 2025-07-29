@@ -372,27 +372,29 @@ class Simulation:
         n = len(self.mesh.nodes)
         lhs, rhs = self.lhs.tolil(), self.rhs
     
-        # no‐slip on the side walls:
+        # 1) no‐slip on the walls:
         wall_nodes = np.unique(np.array(self.mesh.wall_edges).flatten())
         for i in wall_nodes:
-            apply_dirichlet_bc(lhs, rhs,  i    , 0.0)  # u_x = 0
-            apply_dirichlet_bc(lhs, rhs,  i + n, 0.0)  # u_y = 0
+            apply_dirichlet_bc(lhs, rhs, i    , 0.0)   # u_x = 0
+            apply_dirichlet_bc(lhs, rhs, i + n, 0.0)   # u_y = 0
     
-        # flatten inlet/outlet edges → unique nodes
-        inlet_nodes  = np.unique(np.array(self.mesh.inlet_edges).flatten())
-        outlet_nodes = np.unique(np.array(self.mesh.outlet_edges).flatten())
-    
-        # pressure at inlet = 1
+        # 2) velocity inlet (e.g. parabolic in y‐direction)
+        inlet_nodes = np.unique(np.array(self.mesh.inlet_edges).flatten())
+        L = self.geometry_length
+        Umax = 1.0
         for i in inlet_nodes:
-            p_dof = 2*n + self.mesh.pressure_index_map[i]
-            apply_dirichlet_bc(lhs, rhs, p_dof, 1.0)
+            xi = self.mesh.nodes[i,0]
+            v_in = -Umax*(1 - ((xi - L/2)/(L/2))**2)
+            apply_dirichlet_bc(lhs, rhs, i    , 0.0)   # u_x = 0
+            apply_dirichlet_bc(lhs, rhs, i + n, v_in)  # u_y = v_in
     
-        # pressure at outlet = 0
+        # 3) pressure outlet (set p=0 on outlet nodes)
+        outlet_nodes = np.unique(np.array(self.mesh.outlet_edges).flatten())
         for i in outlet_nodes:
-            p_dof = 2*n + self.mesh.pressure_index_map[i]
-            apply_dirichlet_bc(lhs, rhs, p_dof, 0.0)
+            pdof = 2*n + self.mesh.pressure_index_map[i]
+            apply_dirichlet_bc(lhs, rhs, pdof, 0.0)
     
-        # convert back
+        # now back to CSR
         self.lhs, self.rhs = lhs.tocsr(), rhs
 
     
@@ -1122,7 +1124,7 @@ if __name__ == "__main__":
     os.makedirs("simulations", exist_ok=True)
     
     periodic = False
-    nodim = True
+    nodim = False
     
     # Geometry parameters
     if nodim:
@@ -1134,7 +1136,7 @@ if __name__ == "__main__":
         
     else:
         geometry_length = 0.001 # meters 0.001 is 1mm
-        geometry_height = 0.000091 # 91 micrometer thickness
+        geometry_height = 0.0091 # 91 micrometer thickness
         mu = 0.00089 # Viscosity Pa*s
         rho = 1000.0 # Density kg/m^3
         g = 9.81 # m/s^2
@@ -1145,7 +1147,7 @@ if __name__ == "__main__":
     
     # Body forces
     def f(x, y):
-        return (0, -rho*g) # Body force wtih units N/m^3
+        return (0, 0) # Body force with units N/m^3
 
     # Create mesh
     mesh_start = datetime.now()
